@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Machine Sensor Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b24;
+    --border: #262d3a;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --accent: #4da3ff;
+    --safe: #2ecc71;
+    --warn: #f5b642;
+    --danger: #e5484d;
+    --mono: 'Consolas', 'SF Mono', 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.02em; margin: 0 0 4px 0; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+
+  .config { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 24px; display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .config input { background: #0b0e14; border: 1px solid var(--border); color: var(--text); padding: 7px 10px; border-radius: 5px; font-size: 13px; font-family: var(--mono); }
+  .config label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .config button { background: var(--accent); border: none; color: #fff; padding: 8px 16px; border-radius: 5px; font-size: 13px; font-weight: 600; cursor: pointer; height: 34px; }
+  .config button:hover { opacity: 0.9; }
+  #connStatus { font-size: 12px; font-family: var(--mono); padding: 4px 10px; border-radius: 20px; height: 20px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+  .visual-block { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; }
+  .card::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; background: var(--safe); }
+  .card.warn::before { background: var(--warn); }
+  .card.danger::before { background: var(--danger); }
+
+  .card-name { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .card-value { font-family: var(--mono); font-size: 36px; font-weight: 700; line-height: 1; }
+  .card-unit { font-size: 14px; color: var(--muted); margin-left: 4px; }
+  .card-status { display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; padding: 3px 9px; border-radius: 20px; text-transform: uppercase; }
+  .status-safe   { background: rgba(46,204,113,0.15); color: var(--safe); }
+  .status-warn   { background: rgba(245,182,66,0.15); color: var(--warn); }
+  .status-danger { background: rgba(229,72,77,0.15); color: var(--danger); }
+
+  .card.stale { opacity: 0.55; }
+  .last-seen { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: var(--mono); }
+  .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; background: var(--safe); }
+  .card.stale .live-dot { background: var(--muted); }
+
+  .card-thresholds { margin-top: 12px; display: flex; gap: 8px; font-size: 11px; align-items: center; }
+  .card-thresholds input { width: 60px; background: #0b0e14; border: 1px solid var(--border); color: var(--text); padding: 4px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; }
+  .card-thresholds div { color: var(--muted); }
+
+  .gauge-svg { width: 100%; height: auto; display: block; margin: 4px 0; }
+
+  .vibe-container { position: relative; height: 120px; display: flex; align-items: center; justify-content: center; margin: 4px 0; }
+  .vibe-baseline { position: absolute; left: 12%; right: 12%; top: 50%; border-top: 1px dashed var(--border); }
+  .vibe-body { width: 32px; height: 32px; border-radius: 50%; animation-name: vibeShake; animation-timing-function: ease-in-out; animation-iteration-count: infinite; box-shadow: 0 0 12px rgba(0,0,0,0.3); }
+  @keyframes vibeShake {
+    0%, 100% { transform: translateY(0); }
+    25%      { transform: translateY(calc(-1 * var(--vibe-amp, 4px))); }
+    75%      { transform: translateY(var(--vibe-amp, 4px)); }
+  }
+  .reading-value { text-align: center; font-family: var(--mono); font-size: 40px; font-weight: 700; color: var(--text); margin-top: 8px; }
+  .reading-value .card-unit { font-size: 28px; }
+
+  .chart-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+  .chart-panel h2 { font-size: 14px; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  canvas#historyChart { max-height: 320px; }
+</style>
+</head>
+<body>
+
+  <h1>Machine Sensor Dashboard</h1>
+  <div class="subtitle">Live + historical readings from InfluxDB</div>
+
+  <div class="config">
+    <div><label>InfluxDB URL</label><input id="cfgUrl" placeholder="https://your-influx-url" style="width:240px"></div>
+    <div><label>Org</label><input id="cfgOrg" placeholder="Qadri_Group" style="width:130px"></div>
+    <div><label>Bucket</label><input id="cfgBucket" placeholder="Beam" style="width:110px"></div>
+    <div><label>Token</label><input id="cfgToken" type="password" placeholder="API token (read-only)" style="width:200px"></div>
+    <button onclick="saveConfigAndStart()">Connect</button>
+    <span id="connStatus"></span>
+  </div>
+  <div class="subtitle" style="margin-top:-16px; margin-bottom:24px;">
+    Config is saved only in <em>this browser's</em> local storage — nothing here is baked into the public file.
+  </div>
+
+  <div class="grid" id="sensorGrid"></div>
+
+  <div class="chart-panel">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h2>Historical Trend</h2>
+      <div style="display:flex; gap:8px;">
+        <select id="historySensorPicker" onchange="updateHistoryChart()" style="background:#0b0e14; color:var(--text); border:1px solid var(--border); border-radius:5px; padding:6px 10px; font-size:12px;"></select>
+        <select id="historyRangePicker" onchange="clearCustomRangeAndUpdate()" style="background:#0b0e14; color:var(--text); border:1px solid var(--border); border-radius:5px; padding:6px 10px; font-size:12px;">
+          <option value="-1h">Last 1 hour</option>
+          <option value="-6h" selected>Last 6 hours</option>
+          <option value="-24h">Last 24 hours</option>
+          <option value="-7d">Last 7 days</option>
+          <option value="-30d">Last 30 days</option>
+        </select>
+        <span style="color:var(--muted); font-size:12px; align-self:center;">or custom:</span>
+        <input type="datetime-local" id="customStart" style="background:#0b0e14; color:var(--text); border:1px solid var(--border); border-radius:5px; padding:5px 8px; font-size:12px; font-family:var(--mono);">
+        <span style="color:var(--muted); font-size:12px; align-self:center;">to</span>
+        <input type="datetime-local" id="customEnd" style="background:#0b0e14; color:var(--text); border:1px solid var(--border); border-radius:5px; padding:5px 8px; font-size:12px; font-family:var(--mono);">
+        <button onclick="applyCustomRange()" style="background:var(--accent); border:none; color:#fff; padding:6px 12px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Apply</button>
+      </div>
+    </div>
+    <canvas id="historyChart"></canvas>
+  </div>
+
+<script>
+/* ============================================================
+   SENSOR DEFINITIONS — single source of truth.
+   These field/measurement names must exactly match what the
+   ESP32 firmware sends (see sendReadingsToInflux in main.cpp).
+   type "numeric" = plain value card. type "meter" = gauge dial.
+   ============================================================ */
+const SENSORS = [
+  { id: "vibration",   label: "Vibration",   field: "vibration",   measurement: "sensor_reading", unit: "g RMS", type: "shake", max: 1.5, warnMax: 0.5,  dangerMax: 1.0 },
+  { id: "deformation", label: "Deformation", field: "deformation", measurement: "sensor_reading", unit: "mm",   type: "beam",    min: -20, max: 20, warnMax: 2, dangerMax: 5, chartMin: -3, chartMax: 3, chartStep: 0.3 },
+  { id: "temperature", label: "Temperature", field: "temperature", measurement: "sensor_reading", unit: "°C",   type: "meter",   min: 0, max: 100, warnMax: 60,   dangerMax: 80 },
+];
+// NOTE: the numbers above (warnMax/dangerMax/min/max) are PLACEHOLDERS.
+// Edit them either here, or live on the dashboard once it's running —
+// every threshold input on the page is editable.
+
+let config = { url: "", org: "", bucket: "", token: "" };
+let chart = null;
+let pollTimer = null;
+const STALE_AFTER_MS = 15000; // no reading for 15s = "not sending"
+
+window.onload = function() {
+  const saved = localStorage.getItem("dashboardConfig");
+  if (saved) {
+    config = JSON.parse(saved);
+    document.getElementById("cfgUrl").value = config.url;
+    document.getElementById("cfgOrg").value = config.org;
+    document.getElementById("cfgBucket").value = config.bucket;
+    document.getElementById("cfgToken").value = config.token;
+  }
+  buildSensorCards();
+  populateSensorPicker();
+  initChart();
+  if (saved) startPolling();
+};
+
+function saveConfigAndStart() {
+  config = {
+    url: document.getElementById("cfgUrl").value.trim().replace(/\/$/, ""),
+    org: document.getElementById("cfgOrg").value.trim(),
+    bucket: document.getElementById("cfgBucket").value.trim(),
+    token: document.getElementById("cfgToken").value.trim(),
+  };
+  localStorage.setItem("dashboardConfig", JSON.stringify(config));
+  startPolling();
+}
+
+function populateSensorPicker() {
+  document.getElementById("historySensorPicker").innerHTML =
+    SENSORS.map(s => `<option value="${s.id}">${s.label}</option>`).join("");
+}
+
+/* ============================================================
+   Build one card per sensor. Numeric sensors get a plain value
+   display; meter-type sensors (currently temperature) get an SVG gauge
+   container instead — same threshold inputs either way.
+   ============================================================ */
+function buildSensorCards() {
+  const grid = document.getElementById("sensorGrid");
+  grid.innerHTML = "";
+  SENSORS.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.id = "card_" + s.id;
+
+    const valueBlock = s.type === "meter"
+      ? `<div id="gauge_${s.id}" class="visual-block"></div><div class="reading-value" id="vallabel_${s.id}">--</div>`
+      : s.type === "beam"
+      ? `<div id="beam_${s.id}" class="visual-block"></div><div class="reading-value" id="vallabel_${s.id}">--</div>`
+      : s.type === "shake"
+      ? `<div id="shake_${s.id}" class="visual-block"></div><div class="reading-value" id="vallabel_${s.id}">--</div>`
+      : `<div class="card-value" id="val_${s.id}">--<span class="card-unit">${s.unit}</span></div>`;
+
+    card.innerHTML = `
+      <div class="card-name">${s.label}</div>
+      ${valueBlock}
+      <div class="card-status status-safe" id="status_${s.id}">Waiting for data</div>
+      <div class="last-seen" id="lastseen_${s.id}"><span class="live-dot"></span>No data yet</div>
+      <div class="card-thresholds">
+        <div>Warn ≤</div>
+        <input type="number" id="warn_${s.id}" value="${s.warnMax}" onchange="updateThreshold('${s.id}','warnMax',this.value)">
+        <div>Danger ≥</div>
+        <input type="number" id="danger_${s.id}" value="${s.dangerMax}" onchange="updateThreshold('${s.id}','dangerMax',this.value)">
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function updateThreshold(id, key, value) {
+  const s = SENSORS.find(x => x.id === id);
+  if (!s) return;
+  s[key] = parseFloat(value);
+  // Redraw the visual immediately if thresholds changed on a gauge/beam/shake sensor
+  if (s.lastValue !== undefined) {
+    if (s.type === "meter") renderGauge(s, s.lastValue);
+    if (s.type === "beam") renderBeam(s, s.lastValue);
+    if (s.type === "shake") renderShake(s, s.lastValue);
+  }
+}
+
+function classify(sensor, value) {
+  const magnitude = Math.abs(value);
+  if (magnitude >= sensor.dangerMax) return "danger";
+  if (magnitude >= sensor.warnMax) return "warn";
+  return "safe";
+}
+
+/* ============================================================
+   Apply one live reading to its card: updates the value/gauge,
+   the danger-zone color, and the live/stale indicator.
+   ============================================================ */
+function applyReadingToCard(sensor, value, timestamp) {
+  sensor.lastValue = value; // remembered so threshold edits can redraw the gauge
+
+  const zone = classify(sensor, value);
+  const card = document.getElementById("card_" + sensor.id);
+  const statusEl = document.getElementById("status_" + sensor.id);
+  const lastSeenEl = document.getElementById("lastseen_" + sensor.id);
+
+  card.classList.remove("warn", "danger", "stale");
+  statusEl.classList.remove("status-safe", "status-warn", "status-danger");
+
+  if (sensor.type === "meter") {
+    renderGauge(sensor, value);
+  } else if (sensor.type === "beam") {
+    renderBeam(sensor, value);
+  } else if (sensor.type === "shake") {
+    renderShake(sensor, value);
+  } else {
+    document.getElementById("val_" + sensor.id).innerHTML =
+      value.toFixed(4) + `<span class="card-unit">${sensor.unit}</span>`;
+  }
+
+  if (zone === "danger") {
+    card.classList.add("danger"); statusEl.classList.add("status-danger"); statusEl.textContent = "DANGER";
+  } else if (zone === "warn") {
+    card.classList.add("warn"); statusEl.classList.add("status-warn"); statusEl.textContent = "WARNING";
+  } else {
+    statusEl.classList.add("status-safe"); statusEl.textContent = "NORMAL";
+  }
+
+  const ageMs = Date.now() - timestamp.getTime();
+  if (ageMs > STALE_AFTER_MS) {
+    card.classList.add("stale");
+    lastSeenEl.innerHTML = `<span class="live-dot"></span>Not sending — last reading ${Math.round(ageMs/1000)}s ago`;
+  } else {
+    lastSeenEl.innerHTML = `<span class="live-dot"></span>Live`;
+  }
+}
+
+/* ============================================================
+   GAUGE / METER RENDERING (currently used for temperature)
+   Draws a semicircle dial: green/yellow/red zones + a needle.
+   Pure SVG, no extra library needed.
+   ============================================================ */
+function polarToCartesian(cx, cy, r, angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy - r * Math.sin(rad) };
+}
+
+function renderGauge(sensor, value) {
+  const container = document.getElementById("gauge_" + sensor.id);
+  if (!container) return;
+
+  const min = sensor.min ?? 0;
+  const max = sensor.max ?? (sensor.dangerMax * 1.2);
+  const clamped = Math.max(min, Math.min(max, value));
+  const frac = (clamped - min) / (max - min);
+  const warnFrac = Math.max(0, Math.min(1, (sensor.warnMax - min) / (max - min)));
+  const dangerFrac = Math.max(0, Math.min(1, (sensor.dangerMax - min) / (max - min)));
+
+  const cx = 100, cy = 100, r = 80;
+  const angleAt = f => 180 - f * 180; // f=0 -> 180deg (left), f=1 -> 0deg (right)
+
+  function arcPath(f0, f1, color) {
+    const a0 = angleAt(f0), a1 = angleAt(f1);
+    const p0 = polarToCartesian(cx, cy, r, a0);
+    const p1 = polarToCartesian(cx, cy, r, a1);
+    const largeArc = (a0 - a1) >= 180 ? 1 : 0;
+    return `<path d="M ${p0.x} ${p0.y} A ${r} ${r} 0 ${largeArc} 1 ${p1.x} ${p1.y}" stroke="${color}" stroke-width="14" fill="none" stroke-linecap="round"/>`;
+  }
+
+  const needleAngle = angleAt(frac);
+  const needleTip = polarToCartesian(cx, cy, r - 18, needleAngle);
+
+  container.innerHTML = `
+    <svg viewBox="0 0 200 170" class="gauge-svg">
+      ${arcPath(0, warnFrac, "var(--safe)")}
+      ${arcPath(warnFrac, dangerFrac, "var(--warn)")}
+      ${arcPath(dangerFrac, 1, "var(--danger)")}
+      <line x1="${cx}" y1="${cy}" x2="${needleTip.x}" y2="${needleTip.y}" stroke="#e6e9ef" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="${cx}" cy="${cy}" r="6" fill="#e6e9ef"/>
+    </svg>
+  `;
+  const label = document.getElementById("vallabel_" + sensor.id);
+  if (label) label.innerHTML = `${value.toFixed(4)}<span class="card-unit">${sensor.unit}</span>`;
+}
+
+/* ============================================================
+   VIBRATION "SHAKE" VISUAL
+   A small dot bounces up/down continuously — how far it moves
+   (amplitude) and how fast (animation speed) both scale with
+   the current vibration reading, using the same "gentle then
+   sharp" zone-based scaling as the beam and gauge visuals.
+   ============================================================ */
+function renderShake(sensor, value) {
+  const container = document.getElementById("shake_" + sensor.id);
+  if (!container) return;
+
+  const magnitude = Math.abs(value);
+  const maxMagnitude = sensor.max ?? (sensor.dangerMax * 1.5);
+  const f = Math.min(1, magnitude / maxMagnitude);
+  const warnFrac = Math.max(0.001, Math.min(1, sensor.warnMax / maxMagnitude));
+  const dangerFrac = Math.max(warnFrac + 0.001, Math.min(1, sensor.dangerMax / maxMagnitude));
+
+  const SAFE_PX = 10, WARN_PX = 24, DANGER_PX = 40;
+  let amp;
+  if (f <= warnFrac) {
+    amp = (f / warnFrac) * SAFE_PX;
+  } else if (f <= dangerFrac) {
+    amp = SAFE_PX + ((f - warnFrac) / (dangerFrac - warnFrac)) * (WARN_PX - SAFE_PX);
+  } else {
+    const t = dangerFrac < 1 ? Math.min(1, (f - dangerFrac) / (1 - dangerFrac)) : 1;
+    amp = WARN_PX + t * (DANGER_PX - WARN_PX);
+  }
+
+  // Bounces faster as severity increases: ~0.9s when calm, down to ~0.3s at max
+  const duration = Math.max(0.3, 0.9 - f * 0.6).toFixed(2);
+
+  const zone = classify(sensor, value);
+  const color = zone === "danger" ? "var(--danger)" : zone === "warn" ? "var(--warn)" : "var(--safe)";
+
+  container.innerHTML = `
+    <div class="vibe-container">
+      <div class="vibe-baseline"></div>
+      <div class="vibe-body" style="background:${color}; --vibe-amp:${amp}px; animation-duration:${duration}s;"></div>
+    </div>
+  `;
+  const label = document.getElementById("vallabel_" + sensor.id);
+  if (label) label.innerHTML = `${value.toFixed(4)}<span class="card-unit">${sensor.unit}</span>`;
+}
+
+/* ============================================================
+   BEAM / DEFORMATION VISUAL
+   Draws a fixed cantilever beam that bends downward. The key
+   idea: pixels-of-bend-per-unit-value INCREASES per zone, so
+   the beam bends gently across the whole safe range, more in
+   the warn range, and sharply once past the danger threshold —
+   directly driven by the same warnMax/dangerMax you set above.
+   ============================================================ */
+function renderBeam(sensor, value) {
+  const container = document.getElementById("beam_" + sensor.id);
+  if (!container) return;
+
+  // Direction: negative values bend the beam DOWN, positive bend it UP.
+  const direction = value >= 0 ? -1 : 1;
+  const magnitude = Math.abs(value);
+
+  // Severity is judged by magnitude, scaled against the largest possible
+  // magnitude on this sensor's range (so +20 and -20 both hit 100%).
+  const maxMagnitude = Math.max(Math.abs(sensor.min ?? 0), Math.abs(sensor.max ?? sensor.dangerMax * 1.5));
+  const f = Math.min(1, magnitude / maxMagnitude);
+  const warnFrac = Math.max(0.001, Math.min(1, sensor.warnMax / maxMagnitude));
+  const dangerFrac = Math.max(warnFrac + 0.001, Math.min(1, sensor.dangerMax / maxMagnitude));
+
+  // Visual bend budget (in pixels) allotted to each zone — this is
+  // what creates the "slight then sharp" bending effect.
+  const SAFE_MAX_PX = 14, WARN_MAX_PX = 42, DANGER_MAX_PX = 85;
+
+  let px;
+  if (f <= warnFrac) {
+    px = (f / warnFrac) * SAFE_MAX_PX;
+  } else if (f <= dangerFrac) {
+    px = SAFE_MAX_PX + ((f - warnFrac) / (dangerFrac - warnFrac)) * (WARN_MAX_PX - SAFE_MAX_PX);
+  } else {
+    const t = dangerFrac < 1 ? Math.min(1, (f - dangerFrac) / (1 - dangerFrac)) : 1;
+    px = WARN_MAX_PX + t * (DANGER_MAX_PX - WARN_MAX_PX);
+  }
+  px *= direction; // flip upward for negative readings
+
+  const zone = classify(sensor, value);
+  const color = zone === "danger" ? "var(--danger)" : zone === "warn" ? "var(--warn)" : "var(--safe)";
+
+  // Centered vertically now, since the beam can bend either way
+  const x0 = 25, y0 = 92, tipX = 185;
+  const tipY = y0 + px;
+  const ctrlX = x0 + (tipX - x0) * 0.55;
+  const ctrlY = y0 + px * 0.3;
+
+  const wallHatches = Array.from({ length: 5 })
+    .map((_, i) => `<line x1="15" y1="${y0 - 20 + i * 10}" x2="5" y2="${y0 - 28 + i * 10}" stroke="#3a4152" stroke-width="2"/>`)
+    .join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 200 185" class="gauge-svg">
+      <rect x="15" y="${y0 - 20}" width="8" height="40" fill="#3a4152"/>
+      ${wallHatches}
+      <line x1="${x0}" y1="${y0}" x2="${tipX}" y2="${y0}" stroke="#262d3a" stroke-width="1" stroke-dasharray="4 4"/>
+      <path d="M ${x0} ${y0} Q ${ctrlX} ${ctrlY} ${tipX} ${tipY}" stroke="${color}" stroke-width="8" fill="none" stroke-linecap="round"/>
+      <circle cx="${tipX}" cy="${tipY}" r="4" fill="${color}"/>
+    </svg>
+  `;
+  const label = document.getElementById("vallabel_" + sensor.id);
+  if (label) label.innerHTML = `${value.toFixed(4)}<span class="card-unit">${sensor.unit}</span>`;
+}
+
+/* ============================================================
+   InfluxDB queries — last known point (for live cards), and
+   a time-ranged series (for the history chart). Both are
+   independent: history keeps working even if a sensor is stale.
+   ============================================================ */
+async function fetchLatest(sensor) {
+  const flux = `
+    from(bucket: "${config.bucket}")
+      |> range(start: -6h)
+      |> filter(fn: (r) => r._measurement == "${sensor.measurement}")
+      |> filter(fn: (r) => r._field == "${sensor.field}")
+      |> last()
+  `;
+  const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
+    method: "POST",
+    headers: { "Authorization": `Token ${config.token}`, "Content-Type": "application/vnd.flux", "Accept": "application/csv" },
+    body: flux,
+  });
+  if (!res.ok) throw new Error(`InfluxDB error ${res.status}`);
+  return parseLatestPointFromCsv(await res.text());
+}
+
+function parseLatestPointFromCsv(csv) {
+  const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
+  if (lines.length < 2) return null;
+  const header = lines[0].split(",");
+  const valueIdx = header.indexOf("_value");
+  const timeIdx = header.indexOf("_time");
+  const lastLine = lines[lines.length - 1].split(",");
+  if (valueIdx < 0 || !lastLine[valueIdx]) return null;
+  return { value: parseFloat(lastLine[valueIdx]), time: new Date(lastLine[timeIdx]) };
+}
+
+function startPolling() {
+  document.getElementById("connStatus").textContent = "Connecting...";
+  if (pollTimer) clearInterval(pollTimer);
+  pollOnce();
+  pollTimer = setInterval(pollOnce, 3000);
+}
+
+async function pollOnce() {
+  let connectionOk = false;
+  let anyDataEver = false;
+
+  for (const sensor of SENSORS) {
+    try {
+      const point = await fetchLatest(sensor);
+      connectionOk = true;
+      if (point !== null) {
+        applyReadingToCard(sensor, point.value, point.time);
+        anyDataEver = true;
+      }
+    } catch (err) {
+      console.error(`Failed to fetch ${sensor.id}:`, err);
+    }
+  }
+
+  const statusEl = document.getElementById("connStatus");
+  if (connectionOk) {
+    statusEl.textContent = anyDataEver ? "● Connected" : "● Connected — no sensor data yet";
+    statusEl.style.color = "var(--safe)";
+  } else {
+    statusEl.textContent = "● Cannot reach InfluxDB - check console";
+    statusEl.style.color = "var(--danger)";
+  }
+
+  updateHistoryChart(); // always runs, independent of live-card success
+}
+
+function initChart() {
+  const ctx = document.getElementById("historyChart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "line",
+    data: { labels: [], datasets: [{ label: SENSORS[0].label, data: [], borderColor: "#4da3ff", backgroundColor: "rgba(77,163,255,0.08)", fill: true, tension: 0.25, pointRadius: 0 }] },
+    options: {
+      responsive: true,
+      scales: { x: { grid: { color: "#262d3a" }, ticks: { color: "#8b93a3" } }, y: { grid: { color: "#262d3a" }, ticks: { color: "#8b93a3" } } },
+      plugins: { legend: { labels: { color: "#e6e9ef" } } },
+    }
+  });
+}
+
+function applyCustomRange() {
+  const start = document.getElementById("customStart").value;
+  const end = document.getElementById("customEnd").value;
+  if (!start || !end) {
+    alert("Pick both a start and an end time first.");
+    return;
+  }
+  if (new Date(start) >= new Date(end)) {
+    alert("Start time must be before end time.");
+    return;
+  }
+  updateHistoryChart();
+}
+
+function clearCustomRangeAndUpdate() {
+  document.getElementById("customStart").value = "";
+  document.getElementById("customEnd").value = "";
+  updateHistoryChart();
+}
+
+async function updateHistoryChart() {
+  const selectedId = document.getElementById("historySensorPicker").value || SENSORS[0].id;
+  const sensor = SENSORS.find(s => s.id === selectedId) || SENSORS[0];
+  chart.data.datasets[0].label = sensor.label + ` (${sensor.unit})`;
+
+  // Custom start/end (if both are set) takes priority over the preset
+  // dropdown — e.g. "yesterday from 7 to 10 PM".
+  const customStart = document.getElementById("customStart").value;
+  const customEnd = document.getElementById("customEnd").value;
+  let rangeClause;
+  if (customStart && customEnd) {
+    rangeClause = `range(start: ${new Date(customStart).toISOString()}, stop: ${new Date(customEnd).toISOString()})`;
+  } else {
+    const range = document.getElementById("historyRangePicker").value || "-6h";
+    rangeClause = `range(start: ${range})`;
+  }
+
+  // Chart axis: prefer chartMin/chartMax/chartStep (fine-grained view,
+  // e.g. -5 to 5 in 0.5 steps for deformation) if defined, otherwise
+  // fall back to the sensor's physical min/max, otherwise auto-scale.
+  chart.options.scales.y.min = sensor.chartMin ?? sensor.min ?? undefined;
+  chart.options.scales.y.max = sensor.chartMax ?? sensor.max ?? undefined;
+  chart.options.scales.y.ticks.stepSize = sensor.chartStep ?? undefined;
+
+  const flux = `
+    from(bucket: "${config.bucket}")
+      |> ${rangeClause}
+      |> filter(fn: (r) => r._measurement == "${sensor.measurement}")
+      |> filter(fn: (r) => r._field == "${sensor.field}")
+  `;
+  try {
+    const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
+      method: "POST",
+      headers: { "Authorization": `Token ${config.token}`, "Content-Type": "application/vnd.flux", "Accept": "application/csv" },
+      body: flux,
+    });
+    const csv = await res.text();
+    const { labels, values } = parseSeriesFromCsv(csv);
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = values;
+    chart.update();
+  } catch (err) {
+    console.error("History chart fetch failed:", err);
+  }
+}
+
+function parseSeriesFromCsv(csv) {
+  const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
+  if (lines.length < 2) return { labels: [], values: [] };
+  const header = lines[0].split(",");
+  const timeIdx = header.indexOf("_time");
+  const valueIdx = header.indexOf("_value");
+  const labels = [], values = [];
+  for (let i = 1; i < lines.length; i++) {
+    const row = lines[i].split(",");
+    if (row[timeIdx] && row[valueIdx]) {
+      labels.push(new Date(row[timeIdx]).toLocaleTimeString());
+      values.push(parseFloat(row[valueIdx]));
+    }
+  }
+  return { labels, values };
+}
+</script>
+</body>
+</html>
