@@ -518,7 +518,13 @@ function initChart() {
     data: { labels: [], datasets: [{ label: SENSORS[0].label, data: [], borderColor: "#4da3ff", backgroundColor: "rgba(77,163,255,0.08)", fill: true, tension: 0.25, pointRadius: 0 }] },
     options: {
       responsive: true,
-      scales: { x: { grid: { color: "#262d3a" }, ticks: { color: "#8b93a3" } }, y: { grid: { color: "#262d3a" }, ticks: { color: "#8b93a3" } } },
+      scales: {
+        x: {
+          grid: { color: "#262d3a" },
+          ticks: { color: "#8b93a3", autoSkip: true, maxTicksLimit: 12, maxRotation: 45, minRotation: 0 }
+        },
+        y: { grid: { color: "#262d3a" }, ticks: { color: "#8b93a3" } }
+      },
       plugins: { legend: { labels: { color: "#e6e9ef" } } },
     }
   });
@@ -553,13 +559,23 @@ async function updateHistoryChart() {
   // dropdown — e.g. "yesterday from 7 to 10 PM".
   const customStart = document.getElementById("customStart").value;
   const customEnd = document.getElementById("customEnd").value;
-  let rangeClause;
+  let rangeClause, durationMs;
   if (customStart && customEnd) {
-    rangeClause = `range(start: ${new Date(customStart).toISOString()}, stop: ${new Date(customEnd).toISOString()})`;
+    const startDate = new Date(customStart), endDate = new Date(customEnd);
+    rangeClause = `range(start: ${startDate.toISOString()}, stop: ${endDate.toISOString()})`;
+    durationMs = endDate.getTime() - startDate.getTime();
   } else {
     const range = document.getElementById("historyRangePicker").value || "-6h";
     rangeClause = `range(start: ${range})`;
+    durationMs = presetRangeToMs(range);
   }
+
+  // ESP32 posts roughly every 300ms, so anything beyond a short window
+  // has WAY too many raw points to chart or even parse smoothly. Ask
+  // InfluxDB to pre-average the data into a sensible number of buckets
+  // (~300) instead of shipping every single raw point to the browser.
+  const aggregateWindow = pickAggregateWindow(durationMs);
+  const showDate = durationMs > 24 * 60 * 60 * 1000; // include the date on labels for multi-day ranges
 
   // Chart axis: prefer chartMin/chartMax/chartStep (fine-grained view,
   // e.g. -5 to 5 in 0.5 steps for deformation) if defined, otherwise
@@ -573,6 +589,7 @@ async function updateHistoryChart() {
       |> ${rangeClause}
       |> filter(fn: (r) => r._measurement == "${sensor.measurement}")
       |> filter(fn: (r) => r._field == "${sensor.field}")
+      |> aggregateWindow(every: ${aggregateWindow}, fn: mean, createEmpty: false)
   `;
   try {
     const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
@@ -581,7 +598,7 @@ async function updateHistoryChart() {
       body: flux,
     });
     const csv = await res.text();
-    const { labels, values } = parseSeriesFromCsv(csv);
+    const { labels, values } = parseSeriesFromCsv(csv, showDate);
     chart.data.labels = labels;
     chart.data.datasets[0].data = values;
     chart.update();
@@ -590,7 +607,35 @@ async function updateHistoryChart() {
   }
 }
 
-function parseSeriesFromCsv(csv) {
+// Converts a preset dropdown value ("-1h", "-6h", "-24h", "-7d", "-30d")
+// into a plain millisecond duration, so we can size the aggregate window.
+function presetRangeToMs(range) {
+  const match = range.match(/^-(\d+)([hd])$/);
+  if (!match) return 6 * 60 * 60 * 1000; // fallback: 6h
+  const amount = parseInt(match[1], 10);
+  const unitMs = match[2] === "h" ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+  return amount * unitMs;
+}
+
+// Picks an aggregateWindow size that keeps the chart at roughly 300
+// points regardless of how wide the selected range is, so the x-axis
+// stays readable whether you're looking at 1 hour or 30 days.
+function pickAggregateWindow(durationMs) {
+  const targetPoints = 300;
+  const rawSeconds = Math.max(1, Math.floor((durationMs / 1000) / targetPoints));
+  const niceSteps = [
+    { s: 1, label: "1s" }, { s: 5, label: "5s" }, { s: 10, label: "10s" },
+    { s: 30, label: "30s" }, { s: 60, label: "1m" }, { s: 300, label: "5m" },
+    { s: 600, label: "10m" }, { s: 1800, label: "30m" }, { s: 3600, label: "1h" },
+    { s: 21600, label: "6h" }, { s: 43200, label: "12h" }, { s: 86400, label: "1d" },
+  ];
+  for (const step of niceSteps) {
+    if (rawSeconds <= step.s) return step.label;
+  }
+  return "1d";
+}
+
+function parseSeriesFromCsv(csv, showDate) {
   const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
   if (lines.length < 2) return { labels: [], values: [] };
   const header = lines[0].split(",");
@@ -600,7 +645,10 @@ function parseSeriesFromCsv(csv) {
   for (let i = 1; i < lines.length; i++) {
     const row = lines[i].split(",");
     if (row[timeIdx] && row[valueIdx]) {
-      labels.push(new Date(row[timeIdx]).toLocaleTimeString());
+      const d = new Date(row[timeIdx]);
+      labels.push(showDate
+        ? d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : d.toLocaleTimeString());
       values.push(parseFloat(row[valueIdx]));
     }
   }
