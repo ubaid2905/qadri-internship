@@ -74,18 +74,18 @@
 <body>
 
   <h1>Machine Sensor Dashboard</h1>
-  <div class="subtitle">Live + historical readings from InfluxDB</div>
+  <div class="subtitle">
+    Live + historical readings from InfluxDB
+    <span id="settingsToggle" onclick="toggleSettings()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">⚙ connection settings</span>
+  </div>
 
-  <div class="config">
+  <div class="config" id="configPanel" style="display:none;">
     <div><label>InfluxDB URL</label><input id="cfgUrl" placeholder="https://your-influx-url" style="width:240px"></div>
     <div><label>Org</label><input id="cfgOrg" placeholder="Qadri_Group" style="width:130px"></div>
     <div><label>Bucket</label><input id="cfgBucket" placeholder="Beam" style="width:110px"></div>
     <div><label>Token</label><input id="cfgToken" type="password" placeholder="API token (read-only)" style="width:200px"></div>
     <button onclick="saveConfigAndStart()">Connect</button>
     <span id="connStatus"></span>
-  </div>
-  <div class="subtitle" style="margin-top:-16px; margin-bottom:24px;">
-    Config is saved only in <em>this browser's</em> local storage — nothing here is baked into the public file.
   </div>
 
   <div class="grid" id="sensorGrid"></div>
@@ -128,24 +128,47 @@ const SENSORS = [
 // Edit them either here, or live on the dashboard once it's running —
 // every threshold input on the page is editable.
 
+// ============================================================
+// PUBLIC DEFAULT CONFIG — this is a READ-ONLY InfluxDB token
+// (Beam bucket, read permission only, no write access), so it's
+// safe to bake into a public file: worst case someone views the
+// page source and sees sensor data, they can never write/delete.
+// Replace TOKEN_GOES_HERE with your real read-only token before
+// uploading to GitHub Pages.
+// ============================================================
+const DEFAULT_CONFIG = {
+  url: "https://us-east-1-1.aws.cloud2.influxdata.com",
+  org: "Qadri_Group",
+  bucket: "Beam",
+  token: "TOKEN_GOES_HERE",
+};
+
 let config = { url: "", org: "", bucket: "", token: "" };
 let chart = null;
 let pollTimer = null;
 const STALE_AFTER_MS = 15000; // no reading for 15s = "not sending"
 
+function toggleSettings() {
+  const panel = document.getElementById("configPanel");
+  panel.style.display = panel.style.display === "none" ? "flex" : "none";
+}
+
 window.onload = function() {
   const saved = localStorage.getItem("dashboardConfig");
   if (saved) {
     config = JSON.parse(saved);
-    document.getElementById("cfgUrl").value = config.url;
-    document.getElementById("cfgOrg").value = config.org;
-    document.getElementById("cfgBucket").value = config.bucket;
-    document.getElementById("cfgToken").value = config.token;
+  } else {
+    config = { ...DEFAULT_CONFIG };
   }
+  document.getElementById("cfgUrl").value = config.url;
+  document.getElementById("cfgOrg").value = config.org;
+  document.getElementById("cfgBucket").value = config.bucket;
+  document.getElementById("cfgToken").value = config.token;
+
   buildSensorCards();
   populateSensorPicker();
   initChart();
-  if (saved) startPolling();
+  startPolling(); // auto-connects using saved config, or the baked-in read-only default
 };
 
 function saveConfigAndStart() {
