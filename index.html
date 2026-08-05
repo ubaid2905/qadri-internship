@@ -77,6 +77,22 @@
   <div class="subtitle">
     Live + historical readings from InfluxDB
     <span id="settingsToggle" onclick="toggleSettings()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">⚙ connection settings</span>
+    <span id="calToggle" onclick="toggleCalibration()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">🔧 calibration</span>
+  </div>
+
+  <div class="config" id="calibrationPanel" style="display:none;">
+    <div style="width:100%;">
+      <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;">
+        HX711 raw count (hx_raw) — live from InfluxDB
+      </div>
+      <div id="calRawValue" style="font-family:var(--mono); font-size:32px; font-weight:700;">—</div>
+      <div id="calRawTime" style="font-size:11px; color:var(--muted); font-family:var(--mono); margin-top:4px;">no reading yet</div>
+      <div style="font-size:12px; color:var(--muted); margin-top:12px; max-width:520px; line-height:1.5;">
+        For calibration: unload the beam, tare on the ESP32 (Serial Monitor 't'), note this raw value at 0mm,
+        then apply a known deflection and note the raw value again. Slope = (raw2 − raw1) / (defl2_mm − defl1_mm),
+        then update <code>COUNTS_PER_MM</code> in the firmware to that value.
+      </div>
+    </div>
   </div>
 
   <div class="config" id="configPanel" style="display:none;">
@@ -151,6 +167,28 @@ const STALE_AFTER_MS = 15000; // no reading for 15s = "not sending"
 function toggleSettings() {
   const panel = document.getElementById("configPanel");
   panel.style.display = panel.style.display === "none" ? "flex" : "none";
+}
+
+function toggleCalibration() {
+  const panel = document.getElementById("calibrationPanel");
+  panel.style.display = panel.style.display === "none" ? "flex" : "none";
+}
+
+// Not a full "sensor" in the SENSORS array (no thresholds/gauge type -
+// it's a raw diagnostic count for calibration, not a monitored value),
+// but fetchLatest() only needs { measurement, field } so it's reused as-is.
+const HX_RAW_SOURCE = { measurement: "sensor_reading", field: "hx_raw" };
+
+async function pollCalibrationValue() {
+  try {
+    const point = await fetchLatest(HX_RAW_SOURCE);
+    if (point !== null) {
+      document.getElementById("calRawValue").textContent = point.value.toLocaleString();
+      document.getElementById("calRawTime").textContent = "last updated " + point.time.toLocaleTimeString();
+    }
+  } catch (err) {
+    console.error("Failed to fetch hx_raw:", err);
+  }
 }
 
 window.onload = function() {
@@ -509,6 +547,7 @@ async function pollOnce() {
   }
 
   updateHistoryChart(); // always runs, independent of live-card success
+  pollCalibrationValue(); // cheap enough to always run; panel is just hidden until toggled
 }
 
 function initChart() {
