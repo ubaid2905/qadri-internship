@@ -108,6 +108,7 @@
           <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
             <button onclick="sendCommand('tare')" style="background:var(--accent); border:none; color:#fff; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Tare</button>
             <button onclick="sendCommand('read')" style="background:var(--accent); border:none; color:#fff; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Read raw value</button>
+            <span id="cmdStatus" style="font-size:12px; font-family:var(--mono);"></span>
           </div>
           <div style="display:flex; gap:10px; align-items:center;">
             <label style="font-size:12px; color:var(--muted);">Calibration factor (COUNTS_PER_MM):</label>
@@ -235,11 +236,12 @@ function saveAdminToken() {
 async function writeCommand(action, countsPerMm) {
   if (!adminToken) {
     alert("Enter and unlock the admin write token first.");
-    return;
+    return false;
   }
   const seq = Date.now(); // always-increasing, no server round trip needed
   const slope = countsPerMm ?? (document.getElementById("newCountsPerMm").value || 4600000);
   const line = `commands,device=esp32_01 seq=${seq}i,mode="${uiMode}",action="${action}",countsPerMm=${slope}`;
+  const statusEl = document.getElementById("cmdStatus");
 
   try {
     const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
@@ -247,13 +249,22 @@ async function writeCommand(action, countsPerMm) {
       headers: { "Authorization": `Token ${adminToken}`, "Content-Type": "text/plain; charset=utf-8" },
       body: line,
     });
-    if (res.status !== 204) {
-      console.error("Command write failed:", res.status, await res.text());
-      document.getElementById("adminStatus").textContent = "● Write failed — check token permissions";
-      document.getElementById("adminStatus").style.color = "var(--danger)";
+    if (res.status === 204) {
+      statusEl.textContent = `✓ Sent "${action}" — waiting for ESP32 to poll (~1-2s)`;
+      statusEl.style.color = "var(--safe)";
+      return true;
+    } else {
+      const errText = await res.text();
+      console.error("Command write failed:", res.status, errText);
+      statusEl.textContent = `✗ InfluxDB rejected it (HTTP ${res.status}) — check admin token permissions`;
+      statusEl.style.color = "var(--danger)";
+      return false;
     }
   } catch (err) {
     console.error("Command write error:", err);
+    statusEl.textContent = "✗ Request failed — check browser console (F12)";
+    statusEl.style.color = "var(--danger)";
+    return false;
   }
 }
 
@@ -265,9 +276,9 @@ function setMode(mode) {
   writeCommand("none");
 }
 
-function sendCommand(action) {
-  writeCommand(action);
-  if (action === "read") {
+async function sendCommand(action) {
+  const ok = await writeCommand(action);
+  if (ok && action === "read") {
     // Give the ESP32 a moment to poll, act, and write hx_raw back before refreshing.
     setTimeout(pollCalibrationValue, CMD_ROUNDTRIP_DELAY_MS);
   }
