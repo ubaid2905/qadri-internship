@@ -87,10 +87,40 @@
       </div>
       <div id="calRawValue" style="font-family:var(--mono); font-size:32px; font-weight:700;">—</div>
       <div id="calRawTime" style="font-size:11px; color:var(--muted); font-family:var(--mono); margin-top:4px;">no reading yet</div>
-      <div style="font-size:12px; color:var(--muted); margin-top:12px; max-width:520px; line-height:1.5;">
-        For calibration: unload the beam, tare on the ESP32 (Serial Monitor 't'), note this raw value at 0mm,
-        then apply a known deflection and note the raw value again. Slope = (raw2 − raw1) / (defl2_mm − defl1_mm),
-        then update <code>COUNTS_PER_MM</code> in the firmware to that value.
+
+      <div style="border-top:1px solid var(--border); margin:16px 0; padding-top:16px;">
+        <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;">
+          Remote control — requires a WRITE-permission token, entered here only, never baked into this public file
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+          <div><label>Admin write token</label><input id="cfgAdminToken" type="password" placeholder="write-permission token" style="width:200px"></div>
+          <button onclick="saveAdminToken()">Unlock controls</button>
+          <span id="adminStatus" style="font-size:12px; font-family:var(--mono);"></span>
+        </div>
+
+        <div id="calControls" style="display:none; margin-top:14px;">
+          <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+            <span style="font-size:12px; color:var(--muted);">Mode:</span>
+            <button onclick="setMode('calibration')" id="btnModeCalib" style="background:var(--warn); border:none; color:#111; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Calibration</button>
+            <button onclick="setMode('normal')" id="btnModeNormal" style="background:var(--safe); border:none; color:#111; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Normal</button>
+            <span id="currentModeLabel" style="font-size:12px; font-family:var(--mono); color:var(--muted);">mode: unknown</span>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
+            <button onclick="sendCommand('tare')" style="background:var(--accent); border:none; color:#fff; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Tare</button>
+            <button onclick="sendCommand('read')" style="background:var(--accent); border:none; color:#fff; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Read raw value</button>
+          </div>
+          <div style="display:flex; gap:10px; align-items:center;">
+            <label style="font-size:12px; color:var(--muted);">Calibration factor (COUNTS_PER_MM):</label>
+            <input id="newCountsPerMm" type="number" step="any" placeholder="e.g. 4600000" style="width:140px; background:#0b0e14; border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:5px; font-family:var(--mono); font-size:12px;">
+            <button onclick="sendSetSlope()" style="background:var(--accent); border:none; color:#fff; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Set</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="font-size:12px; color:var(--muted); margin-top:16px; max-width:520px; line-height:1.5;">
+        Workflow: switch to Calibration mode (pauses normal sensor pushes) → unload the beam → Tare →
+        apply a known deflection → Read raw value → note both raw readings → Slope = (raw2 − raw1) / (defl2_mm − defl1_mm)
+        → enter it above and Set → switch back to Normal mode. The factor is saved to the ESP32's flash, so it survives a reboot.
       </div>
     </div>
   </div>
@@ -174,6 +204,86 @@ function toggleCalibration() {
   panel.style.display = panel.style.display === "none" ? "flex" : "none";
 }
 
+/* ============================================================
+   REMOTE CALIBRATION CONTROL
+   The admin token is DELIBERATELY kept separate from the main
+   read-only `config.token` — it's write-capable, so it's only
+   ever stored in this browser's localStorage (own key), never
+   baked into the public file. Without it, the panel above is
+   read-only display.
+   ============================================================ */
+let adminToken = localStorage.getItem("dashboardAdminToken") || "";
+let uiMode = "normal"; // last mode this browser told the ESP32 to use
+
+function saveAdminToken() {
+  adminToken = document.getElementById("cfgAdminToken").value.trim();
+  if (!adminToken) {
+    document.getElementById("adminStatus").textContent = "";
+    document.getElementById("calControls").style.display = "none";
+    return;
+  }
+  localStorage.setItem("dashboardAdminToken", adminToken);
+  document.getElementById("adminStatus").textContent = "● Unlocked";
+  document.getElementById("adminStatus").style.color = "var(--safe)";
+  document.getElementById("calControls").style.display = "block";
+}
+
+// Writes ONE point to the "commands" measurement with all four fields
+// together (mode, action, countsPerMm, seq) so the ESP32's pivot() query
+// sees a single coherent row — partial writes would leave stale values
+// mixed with new ones at different timestamps.
+async function writeCommand(action, countsPerMm) {
+  if (!adminToken) {
+    alert("Enter and unlock the admin write token first.");
+    return;
+  }
+  const seq = Date.now(); // always-increasing, no server round trip needed
+  const slope = countsPerMm ?? (document.getElementById("newCountsPerMm").value || 4600000);
+  const line = `commands,device=esp32_01 seq=${seq}i,mode="${uiMode}",action="${action}",countsPerMm=${slope}`;
+
+  try {
+    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
+      method: "POST",
+      headers: { "Authorization": `Token ${adminToken}`, "Content-Type": "text/plain; charset=utf-8" },
+      body: line,
+    });
+    if (res.status !== 204) {
+      console.error("Command write failed:", res.status, await res.text());
+      document.getElementById("adminStatus").textContent = "● Write failed — check token permissions";
+      document.getElementById("adminStatus").style.color = "var(--danger)";
+    }
+  } catch (err) {
+    console.error("Command write error:", err);
+  }
+}
+
+function setMode(mode) {
+  uiMode = mode;
+  document.getElementById("currentModeLabel").textContent = "mode: " + mode;
+  document.getElementById("btnModeCalib").style.opacity = mode === "calibration" ? "1" : "0.5";
+  document.getElementById("btnModeNormal").style.opacity = mode === "normal" ? "1" : "0.5";
+  writeCommand("none");
+}
+
+function sendCommand(action) {
+  writeCommand(action);
+  if (action === "read") {
+    // Give the ESP32 a moment to poll, act, and write hx_raw back before refreshing.
+    setTimeout(pollCalibrationValue, CMD_ROUNDTRIP_DELAY_MS);
+  }
+}
+
+function sendSetSlope() {
+  const val = document.getElementById("newCountsPerMm").value;
+  if (!val || isNaN(parseFloat(val))) {
+    alert("Enter a valid number for the calibration factor first.");
+    return;
+  }
+  writeCommand("set_slope", val);
+}
+const CMD_POLL_ESTIMATE_MS = 2500; // ESP32 polls commands roughly every 1.5s, give it margin
+const CMD_ROUNDTRIP_DELAY_MS = CMD_POLL_ESTIMATE_MS;
+
 // Not a full "sensor" in the SENSORS array (no thresholds/gauge type -
 // it's a raw diagnostic count for calibration, not a monitored value),
 // but fetchLatest() only needs { measurement, field } so it's reused as-is.
@@ -202,6 +312,11 @@ window.onload = function() {
   document.getElementById("cfgOrg").value = config.org;
   document.getElementById("cfgBucket").value = config.bucket;
   document.getElementById("cfgToken").value = config.token;
+
+  if (adminToken) {
+    document.getElementById("cfgAdminToken").value = adminToken;
+    saveAdminToken();
+  }
 
   buildSensorCards();
   populateSensorPicker();
