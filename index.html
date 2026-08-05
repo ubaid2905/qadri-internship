@@ -238,7 +238,12 @@ async function writeCommand(action, countsPerMm) {
     alert("Enter and unlock the admin write token first.");
     return false;
   }
-  const seq = Date.now(); // always-increasing, no server round trip needed
+  // IMPORTANT: seconds, not milliseconds. Date.now() is a 13-digit ms
+  // timestamp, which overflows the ESP32's 32-bit `long` (max ~2.1
+  // billion / 10 digits) - every command would clamp to the same
+  // value and get silently rejected as "not new" after the first one.
+  // Seconds keeps this well under that limit until year 2038.
+  const seq = Math.floor(Date.now() / 1000);
   const slope = countsPerMm ?? (document.getElementById("newCountsPerMm").value || 4600000);
   const line = `commands,device=esp32_01 seq=${seq}i,mode="${uiMode}",action="${action}",countsPerMm=${slope}`;
   const statusEl = document.getElementById("cmdStatus");
