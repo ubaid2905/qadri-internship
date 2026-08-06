@@ -1,0 +1,32 @@
+name: Check Danger Zone Alerts
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub's scheduler isn't perfectly precise
+    # under load, so treat this as "roughly every 5 min", not exact.
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}  # lets you click "Run workflow" manually to test
+
+jobs:
+  check-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install influxdb3-python requests
+
+      - name: Run alert check
+        env:
+          INFLUXDB_HOST: ${{ secrets.INFLUXDB_HOST }}
+          INFLUXDB_DATABASE: ${{ secrets.INFLUXDB_DATABASE }}
+          INFLUXDB_TOKEN: ${{ secrets.INFLUXDB_TOKEN }}
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+        run: python alerts/check_alerts.py
