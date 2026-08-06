@@ -39,7 +39,7 @@ def get_env(name):
 def fetch_latest_field(client, table, field):
     """Latest value of one field from one table (measurement), or None if no rows."""
     query = f"""
-        SELECT time, {field}
+        SELECT {field}
         FROM {table}
         WHERE device = '{DEVICE_TAG}'
         ORDER BY time DESC
@@ -58,7 +58,7 @@ def fetch_latest_field(client, table, field):
 
 def fetch_recipient_list(client):
     query = """
-        SELECT time, emails
+        SELECT emails
         FROM alert_config
         ORDER BY time DESC
         LIMIT 1
