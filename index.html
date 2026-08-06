@@ -78,6 +78,26 @@
     Live + historical readings from InfluxDB
     <span id="settingsToggle" onclick="toggleSettings()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">⚙ connection settings</span>
     <span id="calToggle" onclick="toggleCalibration()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">🔧 calibration</span>
+    <span id="emailToggle" onclick="toggleEmailAlerts()" style="cursor:pointer; color:var(--accent); margin-left:10px; font-size:12px;">📧 email alerts</span>
+  </div>
+
+  <div class="config" id="emailPanel" style="display:none;">
+    <div style="width:100%;">
+      <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;">
+        Danger-zone alert recipients — stored in InfluxDB, read by the alert Tasks on every check
+      </div>
+      <div id="emailListContainer" style="margin-bottom:12px;"></div>
+      <div style="display:flex; gap:10px; align-items:flex-end;">
+        <div><label>Add email address</label><input id="newEmailInput" type="email" placeholder="owner@example.com" style="width:220px"></div>
+        <button onclick="addEmail()">Add</button>
+        <span id="emailStatus" style="font-size:12px; font-family:var(--mono);"></span>
+      </div>
+      <div style="font-size:12px; color:var(--muted); margin-top:12px; max-width:520px; line-height:1.5;">
+        Requires the same admin write token as the calibration controls above (unlock it there first).
+        Anyone on this list gets an email the moment vibration, deformation, or temperature crosses into
+        its danger zone, naming which sensor triggered it.
+      </div>
+    </div>
   </div>
 
   <div class="config" id="calibrationPanel" style="display:none;">
@@ -200,9 +220,129 @@ function toggleSettings() {
   panel.style.display = panel.style.display === "none" ? "flex" : "none";
 }
 
-function toggleCalibration() {
-  const panel = document.getElementById("calibrationPanel");
-  panel.style.display = panel.style.display === "none" ? "flex" : "none";
+function toggleEmailAlerts() {
+  const panel = document.getElementById("emailPanel");
+  const nowShowing = panel.style.display === "none";
+  panel.style.display = nowShowing ? "flex" : "none";
+  if (nowShowing) loadEmailList();
+}
+
+/* ============================================================
+   DANGER-ZONE EMAIL RECIPIENT LIST
+   Stored as ONE InfluxDB point: measurement "alert_config",
+   field "emails" = comma-separated string. The three alert
+   Tasks (deformation/vibration/temperature) read this same
+   point every time they run, so editing the list here takes
+   effect on the very next check — no task redeploy needed.
+   Reading uses the normal read-only config.token; writing
+   (add/remove) uses the admin token, same as calibration.
+   ============================================================ */
+let emailList = [];
+
+async function fetchLatestString(measurement, field) {
+  const flux = `
+    from(bucket: "${config.bucket}")
+      |> range(start: -365d)
+      |> filter(fn: (r) => r._measurement == "${measurement}")
+      |> filter(fn: (r) => r._field == "${field}")
+      |> last()
+  `;
+  const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
+    method: "POST",
+    headers: { "Authorization": `Token ${config.token}`, "Content-Type": "application/vnd.flux", "Accept": "application/csv" },
+    body: flux,
+  });
+  if (!res.ok) return null;
+  const csv = await res.text();
+  const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
+  if (lines.length < 2) return null;
+  const header = lines[0].split(",");
+  const valueIdx = header.indexOf("_value");
+  const lastLine = lines[lines.length - 1].split(",");
+  if (valueIdx < 0 || !lastLine[valueIdx]) return null;
+  return lastLine[valueIdx].replace(/"/g, "");
+}
+
+async function loadEmailList() {
+  document.getElementById("emailStatus").textContent = "Loading...";
+  const raw = await fetchLatestString("alert_config", "emails");
+  emailList = raw ? raw.split(",").map(s => s.trim()).filter(Boolean) : [];
+  renderEmailList();
+  document.getElementById("emailStatus").textContent = "";
+}
+
+function renderEmailList() {
+  const container = document.getElementById("emailListContainer");
+  if (emailList.length === 0) {
+    container.innerHTML = '<div style="font-size:13px; color:var(--muted);">No recipients yet — add one below.</div>';
+    return;
+  }
+  container.innerHTML = emailList.map((email, i) => `
+    <div style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--border); font-family:var(--mono); font-size:13px;">
+      <span style="flex:1;">${email}</span>
+      <button onclick="removeEmail(${i})" style="background:var(--danger); border:none; color:#fff; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer;">Remove</button>
+    </div>
+  `).join("");
+}
+
+// Writes the full comma-joined list back to InfluxDB as one point.
+// Requires the admin write token (same one unlocked in the
+// calibration panel) since this is a write, not a read.
+async function writeEmailList() {
+  if (!adminToken) {
+    alert("Enter and unlock the admin write token in the 🔧 calibration panel first.");
+    return false;
+  }
+  const line = `alert_config emails="${emailList.join(",")}"`;
+  const statusEl = document.getElementById("emailStatus");
+  try {
+    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
+      method: "POST",
+      headers: { "Authorization": `Token ${adminToken}`, "Content-Type": "text/plain; charset=utf-8" },
+      body: line,
+    });
+    if (res.status === 204) {
+      statusEl.textContent = "✓ Saved";
+      statusEl.style.color = "var(--safe)";
+      return true;
+    } else {
+      statusEl.textContent = `✗ Save failed (HTTP ${res.status})`;
+      statusEl.style.color = "var(--danger)";
+      return false;
+    }
+  } catch (err) {
+    console.error("Email list write error:", err);
+    statusEl.textContent = "✗ Request failed — check browser console (F12)";
+    statusEl.style.color = "var(--danger)";
+    return false;
+  }
+}
+
+function isValidEmail(str) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(str);
+}
+
+async function addEmail() {
+  const input = document.getElementById("newEmailInput");
+  const value = input.value.trim();
+  if (!isValidEmail(value)) {
+    alert("Enter a valid email address first.");
+    return;
+  }
+  if (emailList.includes(value)) {
+    alert("That email is already on the list.");
+    return;
+  }
+  emailList.push(value);
+  renderEmailList();
+  const ok = await writeEmailList();
+  if (ok) input.value = "";
+}
+
+async function removeEmail(index) {
+  emailList.splice(index, 1);
+  renderEmailList();
+  await writeEmailList();
 }
 
 /* ============================================================
