@@ -20,7 +20,7 @@ from influxdb_client_3 import InfluxDBClient3
 
 # ---- Thresholds: MUST match the dashboard's SENSORS[].dangerMax values ----
 THRESHOLDS = {
-    "vibration":   {"danger_max": 1.0,  "unit": "g RMS", "abs": False},
+    "vibration":   {"danger_max": 0.01,  "unit": "g RMS", "abs": False},
     "deformation": {"danger_max": 5.0,  "unit": "mm",    "abs": True},   # deformation can go negative too
     "temperature": {"danger_max": 80.0, "unit": "°C",    "abs": False},
 }
