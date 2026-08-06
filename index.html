@@ -220,6 +220,11 @@ function toggleSettings() {
   panel.style.display = panel.style.display === "none" ? "flex" : "none";
 }
 
+function toggleCalibration() {
+  const panel = document.getElementById("calibrationPanel");
+  panel.style.display = panel.style.display === "none" ? "flex" : "none";
+}
+
 function toggleEmailAlerts() {
   const panel = document.getElementById("emailPanel");
   const nowShowing = panel.style.display === "none";
