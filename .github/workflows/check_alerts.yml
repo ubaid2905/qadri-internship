@@ -10,6 +10,10 @@ on:
 jobs:
   check-alerts:
     runs-on: ubuntu-latest
+    timeout-minutes: 3  # force-kill a hung run instead of letting it block the next trigger
+    concurrency:
+      group: check-alerts
+      cancel-in-progress: true  # if a new trigger arrives while an old run is still going, cancel the old one
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
