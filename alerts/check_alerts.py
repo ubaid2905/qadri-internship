@@ -18,11 +18,18 @@ import sys
 import requests
 from influxdb_client_3 import InfluxDBClient3
 
-# ---- Thresholds: MUST match the dashboard's SENSORS[].dangerMax values ----
-THRESHOLDS = {
-    "vibration":   {"danger_max": 0.01,  "unit": "g RMS", "abs": False},
+# ---- Fallback thresholds: used ONLY if the dashboard has never synced a
+# value for that sensor yet. Once synced, live InfluxDB values take over. ----
+DEFAULT_THRESHOLDS = {
+    "vibration":   {"danger_max": 1.0,  "unit": "g RMS", "abs": False},
     "deformation": {"danger_max": 5.0,  "unit": "mm",    "abs": True},   # deformation can go negative too
     "temperature": {"danger_max": 80.0, "unit": "°C",    "abs": False},
+}
+
+THRESHOLD_FIELD_MAP = {
+    "vibration": "danger_vibration",
+    "deformation": "danger_deformation",
+    "temperature": "danger_temperature",
 }
 
 DEVICE_TAG = "esp32_01"
@@ -54,6 +61,25 @@ def fetch_latest_field(client, table, field):
     except Exception as e:
         print(f"Query failed for {table}.{field}: {e}")
         return None
+
+
+def fetch_threshold(client, field, default):
+    """Latest synced value for one danger threshold field, or the default if never set."""
+    query = f"""
+        SELECT {field}
+        FROM alert_config
+        ORDER BY time DESC
+        LIMIT 1
+    """
+    try:
+        table_result = client.query(query=query, language="sql")
+        rows = table_result.to_pylist()
+        if not rows or rows[0].get(field) is None:
+            return default
+        return float(rows[0][field])
+    except Exception as e:
+        print(f"Threshold query failed for {field}, using default {default}: {e}")
+        return default
 
 
 def fetch_recipient_list(client):
@@ -110,7 +136,15 @@ def main():
     recipients = fetch_recipient_list(client)
     print(f"Recipients: {recipients}")
 
-    for field, cfg in THRESHOLDS.items():
+    # Pull live thresholds (dashboard-synced if available, else defaults),
+    # then check every sensor against ITS live value, not a fixed constant.
+    thresholds = {}
+    for field, defaults in DEFAULT_THRESHOLDS.items():
+        live_danger_max = fetch_threshold(client, THRESHOLD_FIELD_MAP[field], defaults["danger_max"])
+        thresholds[field] = {**defaults, "danger_max": live_danger_max}
+        print(f"{field} threshold: {live_danger_max} {defaults['unit']} (dashboard-synced or default)")
+
+    for field, cfg in thresholds.items():
         value = fetch_latest_field(client, "sensor_reading", field)
         if value is None:
             print(f"{field}: no data yet, skipping.")
