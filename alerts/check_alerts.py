@@ -44,11 +44,19 @@ def get_env(name):
 
 
 def fetch_latest_field(client, table, field):
-    """Latest value of one field from one table (measurement), or None if no rows."""
+    """Latest value of one field from one table (measurement), or None if no rows.
+
+    IMPORTANT: filters WHERE {field} IS NOT NULL. InfluxDB 3 stores each write
+    as its own independent row rather than merging into one "current state"
+    row, so a write that only touched OTHER fields would otherwise become the
+    "latest" row here, with this field coming back NULL even though an older
+    row actually set a real value for it.
+    """
     query = f"""
         SELECT {field}
         FROM {table}
         WHERE device = '{DEVICE_TAG}'
+          AND {field} IS NOT NULL
         ORDER BY time DESC
         LIMIT 1
     """
@@ -64,10 +72,16 @@ def fetch_latest_field(client, table, field):
 
 
 def fetch_threshold(client, field, default):
-    """Latest synced value for one danger threshold field, or the default if never set."""
+    """Latest synced value for one danger threshold field, or the default if never set.
+
+    Same "latest non-null row for THIS field" fix as fetch_latest_field — a
+    write to the emails field alone would otherwise be able to shadow a real,
+    older threshold value.
+    """
     query = f"""
         SELECT {field}
         FROM alert_config
+        WHERE {field} IS NOT NULL
         ORDER BY time DESC
         LIMIT 1
     """
@@ -83,9 +97,19 @@ def fetch_threshold(client, field, default):
 
 
 def fetch_recipient_list(client):
+    """Latest non-null 'emails' row.
+
+    This is the fix for the actual bug reported: a threshold-sync write (which
+    only sets danger_vibration/danger_deformation/danger_temperature, never
+    emails) was becoming the "latest" alert_config row under a plain
+    `ORDER BY time DESC LIMIT 1`, so emails came back NULL even though an
+    older row still had the real recipient list. Filtering to rows where
+    emails IS NOT NULL fixes that.
+    """
     query = """
         SELECT emails
         FROM alert_config
+        WHERE emails IS NOT NULL
         ORDER BY time DESC
         LIMIT 1
     """
