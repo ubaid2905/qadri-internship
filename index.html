@@ -241,6 +241,38 @@ let chart = null;
 let pollTimer = null;
 const STALE_AFTER_MS = 15000; // no reading for 15s = "not sending"
 
+// ============================================================
+// QUOTE-AWARE CSV PARSER
+// InfluxDB wraps any _value containing a comma (like our
+// comma-joined email list) in double quotes. A plain
+// line.split(",") breaks that value apart at every comma
+// inside it, which is why previously only the first email in
+// the list ever survived a page refresh. This parser respects
+// quoted fields (and "" escaped quotes) the way real CSV does.
+// Used everywhere we parse an InfluxDB CSV response.
+// ============================================================
+function parseCsvLine(line) {
+  const cells = [];
+  let cur = "", inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } // escaped quote inside a quoted field
+        else inQuotes = false;
+      } else {
+        cur += ch;
+      }
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === ',') { cells.push(cur); cur = ""; }
+      else cur += ch;
+    }
+  }
+  cells.push(cur);
+  return cells;
+}
+
 function toggleSettings() {
   const panel = document.getElementById("configPanel");
   panel.style.display = panel.style.display === "none" ? "flex" : "none";
@@ -289,11 +321,11 @@ async function fetchLatestString(measurement, field) {
   const csv = await res.text();
   const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
   if (lines.length < 2) return null;
-  const header = lines[0].split(",");
+  const header = parseCsvLine(lines[0]);
   const valueIdx = header.indexOf("_value");
-  const lastLine = lines[lines.length - 1].split(",");
+  const lastLine = parseCsvLine(lines[lines.length - 1]);
   if (valueIdx < 0 || !lastLine[valueIdx]) return null;
-  return lastLine[valueIdx].replace(/"/g, "");
+  return lastLine[valueIdx];
 }
 
 async function loadEmailList() {
@@ -567,7 +599,7 @@ window.onload = function() {
   buildSensorCards();
   populateSensorPicker();
   initChart();
-  loadThresholds(); // pull any previously-synced danger thresholds so they match what emails actually use
+  loadThresholds(); // pull any previously-synced warn/danger thresholds so they match what emails actually use
   startPolling(); // auto-connects using saved config, or the baked-in read-only default
 };
 
@@ -624,25 +656,31 @@ function buildSensorCards() {
   });
 }
 
-// Pulls any previously-synced danger thresholds from InfluxDB on load, so
-// the dashboard's cards and check_alerts.py never silently disagree about
-// what "danger" means for each sensor. Falls back to the SENSORS[] defaults
-// already baked into the file if nothing's been synced yet.
+// Pulls any previously-synced warn/danger thresholds from InfluxDB on load,
+// so the dashboard's cards and check_alerts.py never silently disagree about
+// what "warn"/"danger" mean for each sensor. Falls back to the SENSORS[]
+// defaults already baked into the file if nothing's been synced yet.
 async function loadThresholds() {
-  const fieldMap = { vibration: "danger_vibration", deformation: "danger_deformation", temperature: "danger_temperature" };
-  for (const [sensorId, field] of Object.entries(fieldMap)) {
-    try {
-      const raw = await fetchLatestString("alert_config", field);
-      if (raw !== null && !isNaN(parseFloat(raw))) {
-        const s = SENSORS.find(x => x.id === sensorId);
-        if (s) {
-          s.dangerMax = parseFloat(raw);
-          const input = document.getElementById("danger_" + sensorId);
-          if (input) input.value = s.dangerMax;
+  const fieldMap = {
+    vibration:   { danger: "danger_vibration",   warn: "warn_vibration" },
+    deformation: { danger: "danger_deformation", warn: "warn_deformation" },
+    temperature: { danger: "danger_temperature", warn: "warn_temperature" },
+  };
+  for (const [sensorId, fields] of Object.entries(fieldMap)) {
+    const s = SENSORS.find(x => x.id === sensorId);
+    if (!s) continue;
+    for (const [kind, field] of Object.entries(fields)) {
+      try {
+        const raw = await fetchLatestString("alert_config", field);
+        if (raw !== null && !isNaN(parseFloat(raw))) {
+          const propKey = kind === "danger" ? "dangerMax" : "warnMax";
+          s[propKey] = parseFloat(raw);
+          const input = document.getElementById((kind === "danger" ? "danger_" : "warn_") + sensorId);
+          if (input) input.value = s[propKey];
         }
+      } catch (err) {
+        console.error(`Failed to load ${kind} threshold for ${sensorId}:`, err);
       }
-    } catch (err) {
-      console.error(`Failed to load threshold for ${sensorId}:`, err);
     }
   }
 }
@@ -657,25 +695,25 @@ function updateThreshold(id, key, value) {
     if (s.type === "beam") renderBeam(s, s.lastValue);
     if (s.type === "shake") renderShake(s, s.lastValue);
   }
-  // Push danger thresholds to InfluxDB too (so check_alerts.py follows them),
-  // but ONLY if the admin token is unlocked. Without it, this stays purely
-  // local, same as before — casual visitors editing this box on their own
-  // browser never triggers a real write.
-  if (key === "dangerMax" && adminToken) {
+  // Push warn/danger thresholds to InfluxDB too (so check_alerts.py follows
+  // them and they survive a refresh), but ONLY if the admin token is
+  // unlocked. Without it, this stays purely local, same as before — casual
+  // visitors editing this box on their own browser never triggers a write.
+  if ((key === "dangerMax" || key === "warnMax") && adminToken) {
     writeThresholds();
   }
 }
 
-// Writes all 3 sensors' current dangerMax values as one point in the same
-// "alert_config" measurement the email list already lives in. Different
-// fields, same table — InfluxDB handles that fine, and check_alerts.py
-// queries each field independently.
+// Writes all 3 sensors' current warnMax + dangerMax values as one point in
+// the same "alert_config" measurement the email list already lives in.
+// Different fields, same table — InfluxDB handles that fine, and
+// check_alerts.py can query each field independently.
 async function writeThresholds() {
   if (!adminToken) return;
-  const vibration = SENSORS.find(s => s.id === "vibration").dangerMax;
-  const deformation = SENSORS.find(s => s.id === "deformation").dangerMax;
-  const temperature = SENSORS.find(s => s.id === "temperature").dangerMax;
-  const line = `alert_config danger_vibration=${vibration},danger_deformation=${deformation},danger_temperature=${temperature}`;
+  const v = SENSORS.find(s => s.id === "vibration");
+  const d = SENSORS.find(s => s.id === "deformation");
+  const t = SENSORS.find(s => s.id === "temperature");
+  const line = `alert_config danger_vibration=${v.dangerMax},danger_deformation=${d.dangerMax},danger_temperature=${t.dangerMax},warn_vibration=${v.warnMax},warn_deformation=${d.warnMax},warn_temperature=${t.warnMax}`;
   const statusEl = document.getElementById("cmdStatus");
   try {
     const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
@@ -685,7 +723,7 @@ async function writeThresholds() {
     });
     if (statusEl) {
       if (res.status === 204) {
-        statusEl.textContent = "✓ Danger thresholds synced to InfluxDB";
+        statusEl.textContent = "✓ Thresholds synced to InfluxDB";
         statusEl.style.color = "var(--safe)";
       } else {
         statusEl.textContent = `✗ Threshold sync failed (HTTP ${res.status})`;
@@ -930,10 +968,10 @@ async function fetchLatest(sensor) {
 function parseLatestPointFromCsv(csv) {
   const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
   if (lines.length < 2) return null;
-  const header = lines[0].split(",");
+  const header = parseCsvLine(lines[0]);
   const valueIdx = header.indexOf("_value");
   const timeIdx = header.indexOf("_time");
-  const lastLine = lines[lines.length - 1].split(",");
+  const lastLine = parseCsvLine(lines[lines.length - 1]);
   if (valueIdx < 0 || !lastLine[valueIdx]) return null;
   return { value: parseFloat(lastLine[valueIdx]), time: new Date(lastLine[timeIdx]) };
 }
@@ -973,6 +1011,13 @@ async function pollOnce() {
 
   updateHistoryChart(); // always runs, independent of live-card success
   pollCalibrationValue(); // cheap enough to always run; panel is just hidden until toggled
+
+  // Keep the email list in sync across devices/tabs while the panel is
+  // open — if someone else adds/removes an email, it shows up here on
+  // the next poll (~3s) without needing to close and reopen the panel.
+  if (document.getElementById("emailPanel").style.display !== "none") {
+    loadEmailList();
+  }
 }
 
 function initChart() {
@@ -1134,12 +1179,12 @@ function pickAggregateWindow(durationMs) {
 function parseSeriesFromCsv(csv, showDate) {
   const lines = csv.trim().split("\n").filter(l => l && !l.startsWith("#"));
   if (lines.length < 2) return { labels: [], values: [] };
-  const header = lines[0].split(",");
+  const header = parseCsvLine(lines[0]);
   const timeIdx = header.indexOf("_time");
   const valueIdx = header.indexOf("_value");
   const labels = [], values = [];
   for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
+    const row = parseCsvLine(lines[i]);
     if (row[timeIdx] && row[valueIdx]) {
       const d = new Date(row[timeIdx]);
       labels.push(showDate
