@@ -87,6 +87,9 @@
         Danger-zone alert recipients — stored in InfluxDB, read by the alert Tasks on every check
       </div>
       <div id="emailListContainer" style="margin-bottom:12px;"></div>
+      <div style="margin-bottom:10px;">
+        <button onclick="loadEmailList()" style="background:transparent; border:1px solid var(--border); color:var(--muted); padding:5px 10px; border-radius:4px; font-size:11px; cursor:pointer;">🔄 Refresh list</button>
+      </div>
       <div style="display:flex; gap:10px; align-items:flex-end;">
         <div><label>Add email address</label><input id="newEmailInput" type="email" placeholder="owner@example.com" style="width:220px"></div>
         <button onclick="addEmail()">Add</button>
@@ -110,15 +113,30 @@
 
       <div style="border-top:1px solid var(--border); margin:16px 0; padding-top:16px;">
         <div style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;">
-          Remote control — requires a WRITE-permission token, entered here only, never baked into this public file
+          Remote control — the real write token is only ever stored in THIS browser's local storage, never in the public file
         </div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+
+        <div id="quickUnlockRow" style="display:none; margin-bottom:10px;">
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+            <div><label>Password</label><input id="quickPasswordInput" type="password" placeholder="quick-unlock password" style="width:160px"></div>
+            <button onclick="unlockWithPassword()">Unlock</button>
+            <span onclick="showTokenEntry()" style="cursor:pointer; color:var(--accent); font-size:12px; align-self:center;">use token instead</span>
+            <span id="quickUnlockStatus" style="font-size:12px; font-family:var(--mono);"></span>
+          </div>
+        </div>
+
+        <div id="tokenEntryRow" style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
           <div><label>Admin write token</label><input id="cfgAdminToken" type="password" placeholder="write-permission token" style="width:200px"></div>
           <button onclick="saveAdminToken()">Unlock controls</button>
           <span id="adminStatus" style="font-size:12px; font-family:var(--mono);"></span>
         </div>
 
         <div id="calControls" style="display:none; margin-top:14px;">
+          <div style="display:flex; gap:10px; align-items:center; margin-bottom:14px; padding-bottom:14px; border-bottom:1px solid var(--border);">
+            <input id="newQuickPassword" type="password" placeholder="set a quick-unlock password (optional)" style="width:220px; background:#0b0e14; border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:5px; font-size:12px;">
+            <button onclick="setQuickPassword()">Save password</button>
+            <span id="setPasswordStatus" style="font-size:12px; font-family:var(--mono);"></span>
+          </div>
           <div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
             <span style="font-size:12px; color:var(--muted);">Mode:</span>
             <button onclick="setMode('calibration')" id="btnModeCalib" style="background:var(--warn); border:none; color:#111; padding:6px 14px; border-radius:5px; font-size:12px; font-weight:600; cursor:pointer;">Calibration</button>
@@ -258,6 +276,7 @@ async function fetchLatestString(measurement, field) {
       |> range(start: -365d)
       |> filter(fn: (r) => r._measurement == "${measurement}")
       |> filter(fn: (r) => r._field == "${field}")
+      |> filter(fn: (r) => exists r._value)
       |> last()
   `;
   const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
@@ -382,6 +401,56 @@ function saveAdminToken() {
   document.getElementById("calControls").style.display = "block";
 }
 
+// Honest limitation: this password does NOT add real security — anyone could
+// view page source and see exactly how it works. What it DOES do: on a
+// browser that's already had the real token typed in once, it replaces
+// "paste a 40-character token every visit" with "type a short password" —
+// a convenience layer, not an access-control layer. The real token still
+// only exists in this browser's localStorage, same as before.
+function setQuickPassword() {
+  const pw = document.getElementById("newQuickPassword").value.trim();
+  const statusEl = document.getElementById("setPasswordStatus");
+  if (!pw) {
+    statusEl.textContent = "";
+    return;
+  }
+  if (!adminToken) {
+    statusEl.textContent = "✗ Unlock with the real token first";
+    statusEl.style.color = "var(--danger)";
+    return;
+  }
+  localStorage.setItem("dashboardQuickPassword", pw);
+  statusEl.textContent = "✓ Saved — next visit on this browser, you can use the password instead";
+  statusEl.style.color = "var(--safe)";
+  document.getElementById("newQuickPassword").value = "";
+}
+
+function unlockWithPassword() {
+  const typed = document.getElementById("quickPasswordInput").value;
+  const saved = localStorage.getItem("dashboardQuickPassword");
+  const statusEl = document.getElementById("quickUnlockStatus");
+  if (typed && saved && typed === saved) {
+    // The real token, adminToken, is already sitting in this browser's
+    // localStorage from when it was first set up — this just reveals the
+    // controls that use it, it doesn't fetch or transmit anything new.
+    adminToken = localStorage.getItem("dashboardAdminToken") || "";
+    document.getElementById("adminStatus").textContent = "● Unlocked";
+    document.getElementById("adminStatus").style.color = "var(--safe)";
+    document.getElementById("calControls").style.display = "block";
+    statusEl.textContent = "";
+  } else {
+    statusEl.textContent = "✗ Wrong password";
+    statusEl.style.color = "var(--danger)";
+  }
+}
+
+// Lets someone switch back to pasting the real token directly — needed the
+// first time on a new browser, or if they want to reset/change the token.
+function showTokenEntry() {
+  document.getElementById("quickUnlockRow").style.display = "none";
+  document.getElementById("tokenEntryRow").style.display = "flex";
+}
+
 // Writes ONE point to the "commands" measurement with all four fields
 // together (mode, action, countsPerMm, seq) so the ESP32's pivot() query
 // sees a single coherent row — partial writes would leave stale values
@@ -482,9 +551,16 @@ window.onload = function() {
   document.getElementById("cfgBucket").value = config.bucket;
   document.getElementById("cfgToken").value = config.token;
 
-  if (adminToken) {
-    document.getElementById("cfgAdminToken").value = adminToken;
-    saveAdminToken();
+  // Deliberately NOT auto-unlocking calibration/email controls just because
+  // a token exists in storage — that would make the password gate pointless
+  // (anyone on this physical browser could see everything with zero entry).
+  // Instead: if a quick password was set up before, show the short password
+  // prompt; otherwise show the full token field. Either way, it stays
+  // locked until the correct one is entered THIS visit.
+  const savedQuickPassword = localStorage.getItem("dashboardQuickPassword");
+  if (savedQuickPassword) {
+    document.getElementById("quickUnlockRow").style.display = "block";
+    document.getElementById("tokenEntryRow").style.display = "none";
   }
 
   buildSensorCards();
@@ -837,6 +913,7 @@ async function fetchLatest(sensor) {
       |> range(start: -6h)
       |> filter(fn: (r) => r._measurement == "${sensor.measurement}")
       |> filter(fn: (r) => r._field == "${sensor.field}")
+      |> filter(fn: (r) => exists r._value)
       |> last()
   `;
   const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
