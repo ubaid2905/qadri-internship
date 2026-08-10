@@ -270,6 +270,22 @@ function toggleEmailAlerts() {
    ============================================================ */
 let emailList = [];
 
+// InfluxDB writes here used to go out with precision=s and no explicit
+// timestamp. If two writes landed in the same second (e.g. adding two
+// emails quickly), both points got the same second-level timestamp, and
+// "latest" queries (sort by _time desc, limit 1) can break that tie
+// either way — sometimes handing back the OLDER point on refresh, which
+// looked like the second email got silently removed. This counter forces
+// every write to get its own strictly increasing nanosecond timestamp so
+// there's never a tie to break.
+let _lastWriteNs = 0n;
+function nextWriteTimestampNs() {
+  let ns = BigInt(Date.now()) * 1000000n;
+  if (ns <= _lastWriteNs) ns = _lastWriteNs + 1n; // guarantee strictly increasing even if called twice in the same ms
+  _lastWriteNs = ns;
+  return ns.toString();
+}
+
 async function fetchLatestString(measurement, field) {
   const flux = `
     from(bucket: "${config.bucket}")
@@ -326,10 +342,10 @@ async function writeEmailList(list) {
     alert("Enter and unlock the admin write token in the 🔧 calibration panel first.");
     return false;
   }
-  const line = `alert_config emails="${list.join(",")}"`;
+  const line = `alert_config emails="${list.join(",")}" ${nextWriteTimestampNs()}`;
   const statusEl = document.getElementById("emailStatus");
   try {
-    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
+    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=ns`, {
       method: "POST",
       headers: { "Authorization": `Token ${adminToken}`, "Content-Type": "text/plain; charset=utf-8" },
       body: line,
