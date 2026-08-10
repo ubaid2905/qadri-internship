@@ -277,7 +277,8 @@ async function fetchLatestString(measurement, field) {
       |> filter(fn: (r) => r._measurement == "${measurement}")
       |> filter(fn: (r) => r._field == "${field}")
       |> filter(fn: (r) => exists r._value)
-      |> last()
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
   `;
   const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
     method: "POST",
@@ -914,7 +915,8 @@ async function fetchLatest(sensor) {
       |> filter(fn: (r) => r._measurement == "${sensor.measurement}")
       |> filter(fn: (r) => r._field == "${sensor.field}")
       |> filter(fn: (r) => exists r._value)
-      |> last()
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
   `;
   const res = await fetch(`${config.url}/api/v2/query?org=${encodeURIComponent(config.org)}`, {
     method: "POST",
