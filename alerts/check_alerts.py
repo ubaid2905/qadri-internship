@@ -34,6 +34,8 @@ THRESHOLD_FIELD_MAP = {
 
 DEVICE_TAG = "esp32_01"
 
+STALE_AFTER_MINUTES = 5  # if the ESP32 hasn't posted in this long, treat it as offline, not "still in danger"
+
 
 def get_env(name):
     val = os.environ.get(name)
@@ -44,10 +46,13 @@ def get_env(name):
 
 
 def fetch_latest_field(client, table, field):
-    """Latest value of one field from one table (measurement), or None if no rows.
+    """Latest value of one field from one table (measurement), or None if no
+    FRESH row exists (no rows at all, or the newest one is older than
+    STALE_AFTER_MINUTES — meaning the ESP32 is likely powered off/disconnected,
+    so its last reading shouldn't keep re-triggering alerts forever).
 
-    IMPORTANT: filters WHERE {field} IS NOT NULL. InfluxDB 3 stores each write
-    as its own independent row rather than merging into one "current state"
+    Also filters WHERE {field} IS NOT NULL. InfluxDB 3 stores each write as
+    its own independent row rather than merging into one "current state"
     row, so a write that only touched OTHER fields would otherwise become the
     "latest" row here, with this field coming back NULL even though an older
     row actually set a real value for it.
@@ -57,6 +62,7 @@ def fetch_latest_field(client, table, field):
         FROM {table}
         WHERE device = '{DEVICE_TAG}'
           AND {field} IS NOT NULL
+          AND time >= now() - INTERVAL '{STALE_AFTER_MINUTES} minutes'
         ORDER BY time DESC
         LIMIT 1
     """
@@ -99,8 +105,8 @@ def fetch_threshold(client, field, default):
 def fetch_recipient_list(client):
     """Latest non-null 'emails' row.
 
-    This is the fix for the actual bug reported: a threshold-sync write (which
-    only sets danger_vibration/danger_deformation/danger_temperature, never
+    This is the fix for the earlier bug: a threshold-sync write (which only
+    sets danger_vibration/danger_deformation/danger_temperature, never
     emails) was becoming the "latest" alert_config row under a plain
     `ORDER BY time DESC LIMIT 1`, so emails came back NULL even though an
     older row still had the real recipient list. Filtering to rows where
@@ -171,7 +177,7 @@ def main():
     for field, cfg in thresholds.items():
         value = fetch_latest_field(client, "sensor_reading", field)
         if value is None:
-            print(f"{field}: no data yet, skipping.")
+            print(f"{field}: no fresh data in the last {STALE_AFTER_MINUTES} min (offline or no data yet), skipping.")
             continue
 
         in_danger = (abs(value) >= cfg["danger_max"]) if cfg["abs"] else (value >= cfg["danger_max"])
