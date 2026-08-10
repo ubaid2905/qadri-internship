@@ -1,15 +1,17 @@
 """
 Runs on a schedule via GitHub Actions (see .github/workflows/check_alerts.yml).
 Queries InfluxDB Cloud Serverless via SQL for the latest vibration, deformation,
-and temperature readings, compares each against its danger threshold, and emails
-everyone on the dashboard's recipient list (read from the "alert_config" table)
-via SendGrid — naming exactly which sensor(s) triggered it.
+and temperature readings, compares each against its warn AND danger thresholds,
+and emails everyone on the dashboard's recipient list (read from the
+"alert_config" table) via SendGrid — naming exactly which sensor(s) triggered
+it and at which severity.
 
 Because GitHub Actions runs are stateless (nothing persists between runs),
-alert state (was this sensor already in danger last run?) is stored back into
-InfluxDB itself, in an "alert_state" table. This is what lets the script only
-email on ok->danger transitions instead of every single run, plus send a
-periodic reminder if a danger condition persists.
+alert state (what level was this sensor at last run: ok / warn / danger) is
+stored back into InfluxDB itself, in an "alert_state" table. This is what lets
+the script only email on a level change (ok->warn, warn->danger, danger->warn,
+etc.) instead of every single run, plus send a periodic reminder if a
+non-normal condition persists.
 
 Secrets (set in GitHub repo Settings -> Secrets and variables -> Actions):
   INFLUXDB_HOST     e.g. us-east-1-1.aws.cloud2.influxdata.com  (NO https://, NO trailing slash)
@@ -29,21 +31,24 @@ from influxdb_client_3 import InfluxDBClient3, Point
 # ---- Fallback thresholds: used ONLY if the dashboard has never synced a
 # value for that sensor yet. Once synced, live InfluxDB values take over. ----
 DEFAULT_THRESHOLDS = {
-    "vibration":   {"danger_max": 1.0,  "unit": "g RMS", "abs": False},
-    "deformation": {"danger_max": 5.0,  "unit": "mm",    "abs": True},   # deformation can go negative too
-    "temperature": {"danger_max": 80.0, "unit": "°C",    "abs": False},
+    "vibration":   {"warn_max": 0.5, "danger_max": 1.0,  "unit": "g RMS", "abs": False},
+    "deformation": {"warn_max": 2.0, "danger_max": 5.0,  "unit": "mm",    "abs": True},   # deformation can go negative too
+    "temperature": {"warn_max": 60.0, "danger_max": 80.0, "unit": "°C",    "abs": False},
 }
 
 THRESHOLD_FIELD_MAP = {
-    "vibration": "danger_vibration",
-    "deformation": "danger_deformation",
-    "temperature": "danger_temperature",
+    "vibration":   {"warn": "warn_vibration",   "danger": "danger_vibration"},
+    "deformation": {"warn": "warn_deformation", "danger": "danger_deformation"},
+    "temperature": {"warn": "warn_temperature", "danger": "danger_temperature"},
 }
 
 DEVICE_TAG = "esp32_01"
 
 STALE_AFTER_MINUTES = 5   # ESP32 silent this long -> treat as offline, not "still in danger"
-REMINDER_AFTER_MINUTES = 30  # if still in danger, remind again after this long (0 = never remind again)
+REMINDER_AFTER_MINUTES = 30  # if still non-ok, remind again after this long (0 = never remind again)
+
+# Severity ordering, used to detect "got worse" vs "got better" transitions.
+LEVEL_RANK = {"ok": 0, "warn": 1, "danger": 2}
 
 
 def get_env(name):
@@ -82,7 +87,7 @@ def fetch_latest_field(client, table, field):
 
 
 def fetch_threshold(client, field, default):
-    """Latest synced value for one danger threshold field, or the default if never set."""
+    """Latest synced value for one threshold field, or the default if never set."""
     query = f"""
         SELECT {field}
         FROM alert_config
@@ -120,12 +125,16 @@ def fetch_recipient_list(client):
 
 
 def fetch_alert_state(client, field):
-    """Last known state for one sensor's alerting: was it in danger, and when
-    did we last email about it. Returns (was_in_danger: bool, last_alert: datetime|None).
-    Defaults to (False, None) if no state row exists yet (first run ever).
+    """Last known state for one sensor's alerting: what level it was at, and
+    when we last emailed about it. Returns (level: str, last_alert: datetime|None).
+    Defaults to ("ok", None) if no state row exists yet (first run ever).
+
+    Backward compatible with the old boolean-only "is_danger" state rows from
+    before warn-level tracking existed: if "level" is missing but "is_danger"
+    is present, that old row is read as "danger" or "ok".
     """
     query = f"""
-        SELECT is_danger, last_alert_time
+        SELECT level, is_danger, last_alert_time
         FROM alert_state
         WHERE field = '{field}'
         ORDER BY time DESC
@@ -134,23 +143,31 @@ def fetch_alert_state(client, field):
     try:
         rows = client.query(query=query, language="sql").to_pylist()
         if not rows:
-            return False, None
-        was_in_danger = bool(rows[0].get("is_danger"))
-        last_alert_raw = rows[0].get("last_alert_time")
+            return "ok", None
+        row = rows[0]
+        level = row.get("level")
+        if not level:
+            # Old-format row from before warn-level support — fall back to is_danger.
+            level = "danger" if row.get("is_danger") else "ok"
+        last_alert_raw = row.get("last_alert_time")
         last_alert = datetime.fromisoformat(last_alert_raw) if last_alert_raw else None
-        return was_in_danger, last_alert
+        return level, last_alert
     except Exception as e:
-        print(f"Failed to fetch alert_state for {field}, assuming not-in-danger: {e}")
-        return False, None
+        print(f"Failed to fetch alert_state for {field}, assuming ok: {e}")
+        return "ok", None
 
 
-def write_alert_state(client, field, is_danger, last_alert_time):
-    """Persist current state so the next (stateless) run can compare against it."""
+def write_alert_state(client, field, level, last_alert_time):
+    """Persist current state so the next (stateless) run can compare against it.
+    Also writes the old is_danger boolean alongside, purely so older dashboard
+    code or manual InfluxDB browsing that still expects it keeps working.
+    """
     try:
         point = (
             Point("alert_state")
             .tag("field", field)
-            .field("is_danger", is_danger)
+            .field("level", level)
+            .field("is_danger", level == "danger")
             .field("last_alert_time", last_alert_time.isoformat() if last_alert_time else "")
         )
         client.write(record=point)
@@ -182,6 +199,15 @@ def send_email(sendgrid_key, from_email, recipients, subject, body):
         print(f"Sent: {subject} -> {recipients}")
 
 
+def classify(value, warn_max, danger_max, use_abs):
+    magnitude = abs(value) if use_abs else value
+    if magnitude >= danger_max:
+        return "danger"
+    if magnitude >= warn_max:
+        return "warn"
+    return "ok"
+
+
 def main():
     host = get_env("INFLUXDB_HOST")
     database = get_env("INFLUXDB_DATABASE")
@@ -199,53 +225,67 @@ def main():
     print(f"Recipients: {recipients}")
 
     now = datetime.now(timezone.utc)
-    triggered = []  # collects lines for a single combined email this run
+    triggered = []       # lines for this run's email
+    max_level_sent = "ok"  # worst level actually included in this run's email, for the subject line
 
     for field, defaults in DEFAULT_THRESHOLDS.items():
-        cfg = {**defaults, "danger_max": fetch_threshold(client, THRESHOLD_FIELD_MAP[field], defaults["danger_max"])}
-        print(f"{field} threshold: {cfg['danger_max']} {defaults['unit']} (dashboard-synced or default)")
+        field_map = THRESHOLD_FIELD_MAP[field]
+        cfg = {
+            **defaults,
+            "warn_max": fetch_threshold(client, field_map["warn"], defaults["warn_max"]),
+            "danger_max": fetch_threshold(client, field_map["danger"], defaults["danger_max"]),
+        }
+        print(
+            f"{field} thresholds: warn >= {cfg['warn_max']} {defaults['unit']}, "
+            f"danger >= {cfg['danger_max']} {defaults['unit']} (dashboard-synced or default)"
+        )
 
         value = fetch_latest_field(client, "sensor_reading", field)
         if value is None:
             print(f"{field}: no fresh data in the last {STALE_AFTER_MINUTES} min (offline or no data yet), skipping.")
             continue
 
-        in_danger = (abs(value) >= cfg["danger_max"]) if cfg["abs"] else (value >= cfg["danger_max"])
-        print(f"{field}: {value} {cfg['unit']} (danger >= {cfg['danger_max']}) -> {'DANGER' if in_danger else 'ok'}")
+        level = classify(value, cfg["warn_max"], cfg["danger_max"], cfg["abs"])
+        print(f"{field}: {value} {cfg['unit']} -> {level.upper()}")
 
-        was_in_danger, last_alert = fetch_alert_state(client, field)
+        was_level, last_alert = fetch_alert_state(client, field)
 
         should_alert = False
-        if in_danger and not was_in_danger:
-            should_alert = True  # just entered danger zone
-        elif in_danger and was_in_danger and REMINDER_AFTER_MINUTES > 0 and last_alert:
+        if LEVEL_RANK[level] > LEVEL_RANK[was_level]:
+            should_alert = True  # got worse: ok->warn, ok->danger, or warn->danger
+        elif level != "ok" and level == was_level and REMINDER_AFTER_MINUTES > 0 and last_alert:
             minutes_since = (now - last_alert).total_seconds() / 60
             if minutes_since >= REMINDER_AFTER_MINUTES:
-                should_alert = True  # still in danger, reminder is due
+                should_alert = True  # unchanged but non-ok, reminder is due
 
         if should_alert:
+            threshold_used = cfg["danger_max"] if level == "danger" else cfg["warn_max"]
             triggered.append(
-                f"- {field.capitalize()}: {value} {cfg['unit']} (danger threshold: {cfg['danger_max']} {cfg['unit']})"
+                f"- {field.capitalize()}: {value} {cfg['unit']} "
+                f"[{level.upper()}] (threshold: {threshold_used} {cfg['unit']})"
             )
-            write_alert_state(client, field, is_danger=True, last_alert_time=now)
-        elif in_danger:
-            # still in danger but not due for a reminder yet -> keep state, don't reset last_alert
-            write_alert_state(client, field, is_danger=True, last_alert_time=last_alert)
+            if LEVEL_RANK[level] > LEVEL_RANK[max_level_sent]:
+                max_level_sent = level
+            write_alert_state(client, field, level=level, last_alert_time=now)
+        elif level != "ok":
+            # still non-ok but not due for a reminder yet -> keep state, don't reset last_alert
+            write_alert_state(client, field, level=level, last_alert_time=last_alert)
         else:
-            # back to normal -> reset so next danger reading alerts immediately
-            write_alert_state(client, field, is_danger=False, last_alert_time=None)
+            # back to normal -> reset so the next warn/danger reading alerts immediately
+            write_alert_state(client, field, level="ok", last_alert_time=None)
 
     if triggered:
+        subject_word = "DANGER" if max_level_sent == "danger" else "WARNING"
         send_email(
             sendgrid_key,
             from_email,
             recipients,
-            subject=f"DANGER: {len(triggered)} sensor(s) exceeded threshold",
+            subject=f"{subject_word}: {len(triggered)} sensor(s) crossed a threshold",
             body=(
                 f"Device: {DEVICE_TAG}\n\n"
                 + "\n".join(triggered)
-                + "\n\nThis is either a new danger condition or a periodic reminder "
-                  f"(every {REMINDER_AFTER_MINUTES} min while it persists)."
+                + "\n\nThis is either a new warn/danger condition, an escalation, or a periodic "
+                  f"reminder (every {REMINDER_AFTER_MINUTES} min while it persists)."
             ),
         )
     else:
