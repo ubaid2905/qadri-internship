@@ -270,22 +270,6 @@ function toggleEmailAlerts() {
    ============================================================ */
 let emailList = [];
 
-// InfluxDB writes here used to go out with precision=s and no explicit
-// timestamp. If two writes landed in the same second (e.g. adding two
-// emails quickly), both points got the same second-level timestamp, and
-// "latest" queries (sort by _time desc, limit 1) can break that tie
-// either way — sometimes handing back the OLDER point on refresh, which
-// looked like the second email got silently removed. This counter forces
-// every write to get its own strictly increasing nanosecond timestamp so
-// there's never a tie to break.
-let _lastWriteNs = 0n;
-function nextWriteTimestampNs() {
-  let ns = BigInt(Date.now()) * 1000000n;
-  if (ns <= _lastWriteNs) ns = _lastWriteNs + 1n; // guarantee strictly increasing even if called twice in the same ms
-  _lastWriteNs = ns;
-  return ns.toString();
-}
-
 async function fetchLatestString(measurement, field) {
   const flux = `
     from(bucket: "${config.bucket}")
@@ -337,15 +321,15 @@ function renderEmailList() {
 // Writes the full comma-joined list back to InfluxDB as one point.
 // Requires the admin write token (same one unlocked in the
 // calibration panel) since this is a write, not a read.
-async function writeEmailList(list) {
+async function writeEmailList() {
   if (!adminToken) {
     alert("Enter and unlock the admin write token in the 🔧 calibration panel first.");
     return false;
   }
-  const line = `alert_config emails="${list.join(",")}" ${nextWriteTimestampNs()}`;
+  const line = `alert_config emails="${emailList.join(",")}"`;
   const statusEl = document.getElementById("emailStatus");
   try {
-    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=ns`, {
+    const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
       method: "POST",
       headers: { "Authorization": `Token ${adminToken}`, "Content-Type": "text/plain; charset=utf-8" },
       body: line,
@@ -382,26 +366,16 @@ async function addEmail() {
     alert("That email is already on the list.");
     return;
   }
-  // Don't touch emailList / re-render until the write is confirmed —
-  // otherwise a failed save still looks "added" until the next refresh.
-  const candidateList = [...emailList, value];
-  const ok = await writeEmailList(candidateList);
-  if (ok) {
-    emailList = candidateList;
-    renderEmailList();
-    input.value = "";
-  }
+  emailList.push(value);
+  renderEmailList();
+  const ok = await writeEmailList();
+  if (ok) input.value = "";
 }
 
 async function removeEmail(index) {
-  // Same fix as addEmail: compute the candidate list, only commit to
-  // emailList/UI once InfluxDB confirms the write.
-  const candidateList = emailList.filter((_, i) => i !== index);
-  const ok = await writeEmailList(candidateList);
-  if (ok) {
-    emailList = candidateList;
-    renderEmailList();
-  }
+  emailList.splice(index, 1);
+  renderEmailList();
+  await writeEmailList();
 }
 
 /* ============================================================
@@ -688,7 +662,7 @@ function updateThreshold(id, key, value) {
   // local, same as before — casual visitors editing this box on their own
   // browser never triggers a real write.
   if (key === "dangerMax" && adminToken) {
-    writeThresholds(id);
+    writeThresholds();
   }
 }
 
@@ -696,35 +670,13 @@ function updateThreshold(id, key, value) {
 // "alert_config" measurement the email list already lives in. Different
 // fields, same table — InfluxDB handles that fine, and check_alerts.py
 // queries each field independently.
-//
-// Fetches the LATEST synced value for each sensor fresh from InfluxDB right
-// before writing, and only overrides the one sensor actually being edited
-// with its new in-memory value. Previously this reused whatever was sitting
-// in the in-memory SENSORS[] array for ALL three sensors — if another
-// sensor's fresh value had never been loaded (or loadThresholds() hadn't
-// finished yet), editing one sensor would silently re-save a stale/default
-// value for the OTHER two, clobbering their real synced thresholds.
-async function writeThresholds(editedId) {
+async function writeThresholds() {
   if (!adminToken) return;
-  const fieldMap = { vibration: "danger_vibration", deformation: "danger_deformation", temperature: "danger_temperature" };
+  const vibration = SENSORS.find(s => s.id === "vibration").dangerMax;
+  const deformation = SENSORS.find(s => s.id === "deformation").dangerMax;
+  const temperature = SENSORS.find(s => s.id === "temperature").dangerMax;
+  const line = `alert_config danger_vibration=${vibration},danger_deformation=${deformation},danger_temperature=${temperature}`;
   const statusEl = document.getElementById("cmdStatus");
-
-  const fresh = {};
-  for (const [sensorId, field] of Object.entries(fieldMap)) {
-    if (sensorId === editedId) {
-      // Use the just-edited in-memory value — this IS the new source of truth for this one.
-      fresh[sensorId] = SENSORS.find(s => s.id === sensorId).dangerMax;
-      continue;
-    }
-    // For every OTHER sensor, re-fetch its current synced value instead of
-    // trusting whatever happens to be in memory, so it can't be clobbered.
-    const raw = await fetchLatestString("alert_config", field);
-    fresh[sensorId] = raw !== null && !isNaN(parseFloat(raw))
-      ? parseFloat(raw)
-      : SENSORS.find(s => s.id === sensorId).dangerMax; // fall back to in-memory/default only if nothing synced yet
-  }
-
-  const line = `alert_config danger_vibration=${fresh.vibration},danger_deformation=${fresh.deformation},danger_temperature=${fresh.temperature}`;
   try {
     const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
       method: "POST",
