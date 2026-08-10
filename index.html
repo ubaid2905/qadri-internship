@@ -321,12 +321,12 @@ function renderEmailList() {
 // Writes the full comma-joined list back to InfluxDB as one point.
 // Requires the admin write token (same one unlocked in the
 // calibration panel) since this is a write, not a read.
-async function writeEmailList() {
+async function writeEmailList(list) {
   if (!adminToken) {
     alert("Enter and unlock the admin write token in the 🔧 calibration panel first.");
     return false;
   }
-  const line = `alert_config emails="${emailList.join(",")}"`;
+  const line = `alert_config emails="${list.join(",")}"`;
   const statusEl = document.getElementById("emailStatus");
   try {
     const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
@@ -366,16 +366,26 @@ async function addEmail() {
     alert("That email is already on the list.");
     return;
   }
-  emailList.push(value);
-  renderEmailList();
-  const ok = await writeEmailList();
-  if (ok) input.value = "";
+  // Don't touch emailList / re-render until the write is confirmed —
+  // otherwise a failed save still looks "added" until the next refresh.
+  const candidateList = [...emailList, value];
+  const ok = await writeEmailList(candidateList);
+  if (ok) {
+    emailList = candidateList;
+    renderEmailList();
+    input.value = "";
+  }
 }
 
 async function removeEmail(index) {
-  emailList.splice(index, 1);
-  renderEmailList();
-  await writeEmailList();
+  // Same fix as addEmail: compute the candidate list, only commit to
+  // emailList/UI once InfluxDB confirms the write.
+  const candidateList = emailList.filter((_, i) => i !== index);
+  const ok = await writeEmailList(candidateList);
+  if (ok) {
+    emailList = candidateList;
+    renderEmailList();
+  }
 }
 
 /* ============================================================
@@ -662,7 +672,7 @@ function updateThreshold(id, key, value) {
   // local, same as before — casual visitors editing this box on their own
   // browser never triggers a real write.
   if (key === "dangerMax" && adminToken) {
-    writeThresholds();
+    writeThresholds(id);
   }
 }
 
@@ -670,13 +680,35 @@ function updateThreshold(id, key, value) {
 // "alert_config" measurement the email list already lives in. Different
 // fields, same table — InfluxDB handles that fine, and check_alerts.py
 // queries each field independently.
-async function writeThresholds() {
+//
+// Fetches the LATEST synced value for each sensor fresh from InfluxDB right
+// before writing, and only overrides the one sensor actually being edited
+// with its new in-memory value. Previously this reused whatever was sitting
+// in the in-memory SENSORS[] array for ALL three sensors — if another
+// sensor's fresh value had never been loaded (or loadThresholds() hadn't
+// finished yet), editing one sensor would silently re-save a stale/default
+// value for the OTHER two, clobbering their real synced thresholds.
+async function writeThresholds(editedId) {
   if (!adminToken) return;
-  const vibration = SENSORS.find(s => s.id === "vibration").dangerMax;
-  const deformation = SENSORS.find(s => s.id === "deformation").dangerMax;
-  const temperature = SENSORS.find(s => s.id === "temperature").dangerMax;
-  const line = `alert_config danger_vibration=${vibration},danger_deformation=${deformation},danger_temperature=${temperature}`;
+  const fieldMap = { vibration: "danger_vibration", deformation: "danger_deformation", temperature: "danger_temperature" };
   const statusEl = document.getElementById("cmdStatus");
+
+  const fresh = {};
+  for (const [sensorId, field] of Object.entries(fieldMap)) {
+    if (sensorId === editedId) {
+      // Use the just-edited in-memory value — this IS the new source of truth for this one.
+      fresh[sensorId] = SENSORS.find(s => s.id === sensorId).dangerMax;
+      continue;
+    }
+    // For every OTHER sensor, re-fetch its current synced value instead of
+    // trusting whatever happens to be in memory, so it can't be clobbered.
+    const raw = await fetchLatestString("alert_config", field);
+    fresh[sensorId] = raw !== null && !isNaN(parseFloat(raw))
+      ? parseFloat(raw)
+      : SENSORS.find(s => s.id === sensorId).dangerMax; // fall back to in-memory/default only if nothing synced yet
+  }
+
+  const line = `alert_config danger_vibration=${fresh.vibration},danger_deformation=${fresh.deformation},danger_temperature=${fresh.temperature}`;
   try {
     const res = await fetch(`${config.url}/api/v2/write?org=${encodeURIComponent(config.org)}&bucket=${encodeURIComponent(config.bucket)}&precision=s`, {
       method: "POST",
