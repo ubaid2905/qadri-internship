@@ -15,7 +15,7 @@ non-normal condition persists.
 
 Secrets (set in GitHub repo Settings -> Secrets and variables -> Actions):
   INFLUXDB_HOST     e.g. us-east-1-1.aws.cloud2.influxdata.com  (NO https://, NO trailing slash)
-  INFLUXDB_DATABASE e.g. Beam
+  INFLUXDB_DATABASE e.g. IoT Monitoring
   INFLUXDB_TOKEN    Read+write token for that database (write is needed now, for alert_state)
   SENDGRID_API_KEY  Your SendGrid API key (Mail Send permission)
   FROM_EMAIL        Your verified SendGrid sender address
